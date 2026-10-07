@@ -4,6 +4,7 @@ import {
   addMessage,
   createConversation,
   findActiveUserByPhone,
+  getTask,
   getUser,
   isBlocked,
   query,
@@ -13,9 +14,11 @@ import {
 import { toE164 } from "../phone.js";
 import { finishTask, latestTaskForNumber } from "../tasks.js";
 import { requireTwilioSignature } from "../twilio.js";
-import { createRelaySession } from "../voice/sessions.js";
+import { connectCall } from "../voice/connect.js";
+import { dropPrewarmedCall } from "../voice/live.js";
 import { finalizeCall } from "../voice/summary.js";
-import { buildCallTwiml, sayAndHangup } from "../voice/twiml.js";
+import { sayAndHangup } from "../voice/twiml.js";
+import { fillGreeting, getSettings } from "../settings.js";
 
 export const voiceRouter = express.Router();
 
@@ -32,12 +35,16 @@ voiceRouter.post("/twilio/voice", requireTwilioSignature, async (req, res) => {
 });
 
 async function inboundCallTwiml(from: string, callSid: string): Promise<string> {
+  const settings = await getSettings();
   const user = await findActiveUserByPhone(from);
   if (user) {
     const conversation = await createConversation({ kind: "user_call", userId: user.id, counterpartPhone: from, direction: "inbound", callSid });
-    const greeting = `Hi ${user.name.split(" ")[0]}, it's ${config.agent.name}. Just so you know, this call is recorded and transcribed. What can I do for you?`;
-    const token = createRelaySession({ mode: "user", conversationId: conversation.id, userId: user.id, greeting });
-    return buildCallTwiml(token, greeting);
+    if (!settings.callsEnabled) {
+      await addMessage(conversation.id, "event", "Calls are turned off; call rejected");
+      return sayAndHangup(`Sorry, ${config.agent.name} isn't taking calls right now. You can still use the web chat. Goodbye.`);
+    }
+    const greeting = fillGreeting(settings.greetingUserInbound, { agent: config.agent.name, caller: user.name.split(" ")[0] });
+    return connectCall({ mode: "user", conversationId: conversation.id, userId: user.id, greeting });
   }
 
   // A third party calling back about something we contacted them about.
@@ -52,16 +59,52 @@ async function inboundCallTwiml(from: string, callSid: string): Promise<string> 
       direction: "inbound",
       callSid,
     });
+    if (!settings.callsEnabled) {
+      await addMessage(conversation.id, "event", "Calls are turned off; call rejected");
+      return sayAndHangup("Sorry, no one is available to take your call right now. Goodbye.");
+    }
     await query("UPDATE tasks SET status = 'in_progress', completed_at = NULL WHERE id = $1", [task.id]);
-    const greeting = `Hi, this is ${config.agent.name}, an AI assistant for ${requester.name}, following up on our earlier message. This call is recorded and transcribed. How can I help?`;
-    const token = createRelaySession({ mode: "task", conversationId: conversation.id, taskId: task.id, userId: requester.id, greeting });
-    return buildCallTwiml(token, greeting);
+    const greeting = fillGreeting(settings.greetingCallback, { agent: config.agent.name, requester: requester.name });
+    return connectCall({ mode: "task", conversationId: conversation.id, taskId: task.id, userId: requester.id, greeting });
   }
 
   const conversation = await createConversation({ kind: "unknown_call", counterpartPhone: from, direction: "inbound", callSid });
   await addMessage(conversation.id, "event", "Call from a number that is not invited; rejected");
   return sayAndHangup("Sorry, this number only takes calls from invited users. Goodbye.");
 }
+
+/**
+ * An outbound task call was answered: Twilio fetches its instructions now, so
+ * the greeting (from current settings) and GPT-Live start exactly at pickup.
+ */
+voiceRouter.post("/twilio/voice/answered/:conversationId", requireTwilioSignature, async (req, res) => {
+  try {
+    const conversation = await queryOne<Conversation>(
+      "SELECT * FROM conversations WHERE id = $1 AND kind = 'task_call' AND direction = 'outbound'",
+      [Number(req.params.conversationId)],
+    );
+    const callSid = String(req.body.CallSid ?? "");
+    const task = conversation?.task_id ? await getTask(conversation.task_id) : undefined;
+    const requester = task && (await getUser(task.user_id));
+    if (!conversation || !task || !requester || (conversation.call_sid && conversation.call_sid !== callSid)) {
+      return void res.type("text/xml").send("<Response><Hangup/></Response>");
+    }
+    const settings = await getSettings();
+    if (!settings.callsEnabled || task.status === "cancelled") {
+      await addMessage(conversation.id, "event", "Call answered after calls were turned off or the task was cancelled; hung up");
+      return void res.type("text/xml").send("<Response><Hangup/></Response>");
+    }
+    const greeting = fillGreeting(settings.greetingOutbound, {
+      agent: config.agent.name,
+      requester: requester.name,
+      recipient: task.target_name || "there",
+    });
+    res.type("text/xml").send(connectCall({ mode: "task", conversationId: conversation.id, taskId: task.id, userId: requester.id, greeting }));
+  } catch (err) {
+    console.error("Answered-call setup failed", err);
+    res.type("text/xml").send("<Response><Hangup/></Response>");
+  }
+});
 
 /** Called by <Connect action> when the ConversationRelay session ends. */
 voiceRouter.post("/twilio/voice/relay-ended", requireTwilioSignature, (_req, res) => {
@@ -81,6 +124,7 @@ voiceRouter.post("/twilio/voice/status", requireTwilioSignature, async (req, res
       [req.body.CallSid, status, status === "completed" || NOT_CONNECTED.has(status)],
     );
     if (!conversation) return;
+    if (status === "completed" || NOT_CONNECTED.has(status)) dropPrewarmedCall(conversation.id);
     if (NOT_CONNECTED.has(status)) {
       await addMessage(conversation.id, "event", `Call ${status}`);
       if (conversation.task_id && conversation.direction === "outbound") {

@@ -12,8 +12,7 @@ import {
 } from "./db/index.js";
 import { countryOf, formatPhone, toE164 } from "./phone.js";
 import { twilioClient } from "./twilio.js";
-import { createRelaySession } from "./voice/sessions.js";
-import { buildCallTwiml } from "./voice/twiml.js";
+import { getSettings } from "./settings.js";
 
 export class TaskError extends Error {}
 
@@ -29,12 +28,14 @@ export async function checkOutboundAllowed(user: User, rawPhone: string): Promis
   if (isEmergencyOrShortCode(phone)) throw new TaskError("I can't contact emergency or special service numbers.");
   if (await isBlocked(phone)) throw new TaskError("That number has opted out or been blocked by the administrator.");
 
+  const settings = await getSettings();
+  if (!settings.callsEnabled) throw new TaskError("Calling is turned off by the administrator right now.");
   const hour = Number(
-    new Intl.DateTimeFormat("en-US", { hour: "numeric", hour12: false, timeZone: config.agent.timezone }).format(new Date()),
+    new Intl.DateTimeFormat("en-US", { hour: "numeric", hour12: false, timeZone: settings.timezone }).format(new Date()),
   ) % 24;
-  if (hour < config.agent.contactHoursStart || hour >= config.agent.contactHoursEnd) {
+  if (hour < settings.contactHoursStart || hour >= settings.contactHoursEnd) {
     throw new TaskError(
-      `I only contact people between ${config.agent.contactHoursStart}:00 and ${config.agent.contactHoursEnd}:00 (${config.agent.timezone}). Please ask again then.`,
+      `I only call people between ${settings.contactHoursStart}:00 and ${settings.contactHoursEnd}:00 (${settings.timezone}). Please ask again then.`,
     );
   }
 
@@ -43,7 +44,7 @@ export async function checkOutboundAllowed(user: User, rawPhone: string): Promis
     [user.id],
   );
   if (Number(row?.count ?? 0) >= config.agent.maxOutboundPerUserPerDay) {
-    throw new TaskError("You've reached today's limit for outbound calls and texts.");
+    throw new TaskError("You've reached today's limit for calls.");
   }
   return phone;
 }
@@ -68,11 +69,6 @@ async function createTask(user: User, t: {
   return task!;
 }
 
-export function callGreeting(user: User, targetName: string): string {
-  const who = targetName ? `Hi ${targetName}, this` : "Hi, this";
-  return `${who} is ${config.agent.name}, an AI assistant calling on behalf of ${user.name}. This call is being recorded and transcribed. Is now a good time for a quick question?`;
-}
-
 export async function startCallTask(user: User, input: {
   phone: string;
   recipientName: string;
@@ -93,19 +89,22 @@ export async function placeTaskCall(task: Task, user: User): Promise<void> {
     counterpartPhone: task.target_phone,
     direction: "outbound",
   });
-  const greeting = callGreeting(user, task.target_name);
-  const token = createRelaySession({ mode: "task", conversationId: conversation.id, taskId: task.id, userId: user.id, greeting });
+  const settings = await getSettings();
   try {
+    // Twilio fetches the call's instructions when it's answered, so the
+    // greeting and GPT-Live start exactly at pickup.
     const call = await twilioClient.calls.create({
       to: task.target_phone,
       from: config.twilio.phoneNumber,
-      twiml: buildCallTwiml(token, greeting),
+      url: `${config.publicBaseUrl}/twilio/voice/answered/${conversation.id}`,
+      method: "POST",
       record: true,
       recordingStatusCallback: `${config.publicBaseUrl}/twilio/voice/recording`,
       recordingStatusCallbackEvent: ["completed"],
       statusCallback: `${config.publicBaseUrl}/twilio/voice/status`,
       statusCallbackEvent: ["initiated", "ringing", "answered", "completed"],
-      timeLimit: config.agent.maxCallMinutes * 60,
+      // Hard stop a minute after the agent is told to wrap up.
+      timeLimit: (settings.maxCallMinutes + 1) * 60,
     });
     await query("UPDATE conversations SET call_sid = $1, call_status = 'queued' WHERE id = $2", [call.sid, conversation.id]);
     await addMessage(conversation.id, "event", `Outbound call placed to ${formatPhone(task.target_phone)} for task #${task.id}`);

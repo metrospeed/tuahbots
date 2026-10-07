@@ -2,6 +2,7 @@ import express from "express";
 import { fmtDate } from "../admin/views.js";
 import { listMessages, query, queryOne, type Attachment, type Conversation, type Task } from "../db/index.js";
 import { formatPhone } from "../phone.js";
+import { getSettings } from "../settings.js";
 import { recentTasks, userChatConversation } from "../tasks.js";
 import { fetchRecording } from "../twilio.js";
 import { clearUserCookie, requireUser, setUserCookie, userForInviteToken } from "./auth.js";
@@ -47,6 +48,7 @@ webRouter.get("/app/api/state", async (req, res) => {
   const tasks = await recentTasks(user.id, 15);
   res.json({
     busy: isBusy(user.id),
+    callsEnabled: (await getSettings()).callsEnabled,
     messages: messages.map((m) => ({
       ...m,
       time: fmtDate(m.created_at),

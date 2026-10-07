@@ -50,6 +50,7 @@ form.composer textarea{flex:1;resize:none;max-height:160px;padding:10px 12px;bor
 .chips{display:flex;flex-wrap:wrap;gap:6px;padding:0 16px}
 .chips span{font-size:13px;background:var(--bg);border:1px solid var(--line);border-radius:99px;padding:2px 10px;margin-top:8px}
 .error{color:var(--bad);font-size:14px;padding:0 16px}
+.notice{background:var(--bad);color:#fff;font-size:14px;padding:6px 16px;text-align:center}
 aside{width:300px;border-left:1px solid var(--line);overflow-y:auto;padding:16px;background:var(--card)}
 aside h3{margin:0 0 10px;font-size:15px}
 .task{display:block;text-decoration:none;color:inherit;padding:10px 0;border-bottom:1px solid var(--line)}
@@ -61,6 +62,7 @@ aside h3{margin:0 0 10px;font-size:15px}
 <body>
 <header><span class="title">${esc(name)}</span><span class="who">${esc(user.name)}</span>
 <form method="post" action="/app/logout"><button>Sign out</button></form></header>
+<div class="notice" id="callsOff" hidden>Calling is turned off right now. You can still chat, but ${esc(name)} can't place calls.</div>
 <div class="layout">
   <section class="chat">
     <div id="log" aria-live="polite"></div>
@@ -143,6 +145,7 @@ aside h3{margin:0 0 10px;font-size:15px}
         }
       }
       busy = state.busy;
+      document.getElementById("callsOff").hidden = state.callsEnabled !== false;
       setTyping(busy);
       renderTasks(state.tasks);
       showEmpty();
