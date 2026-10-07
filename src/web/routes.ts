@@ -3,7 +3,8 @@ import { fmtDate } from "../admin/views.js";
 import { listMessages, query, queryOne, type Attachment, type Conversation, type Task } from "../db/index.js";
 import { formatPhone } from "../phone.js";
 import { getSettings } from "../settings.js";
-import { recentTasks, userChatConversation } from "../tasks.js";
+import { clearChat, clearUserNumbers, listUserNumbers, setCallbackAllowed } from "../numbers.js";
+import { recentTasks, userChatConversation, visibleTask } from "../tasks.js";
 import { fetchRecording } from "../twilio.js";
 import {
   changePassword,
@@ -153,6 +154,7 @@ webRouter.get("/app/api/state", async (req, res) => {
     [messages.map((m) => m.id)],
   );
   const tasks = await recentTasks(user.id, 15);
+  const numbers = await listUserNumbers(user.id);
   res.json({
     busy: isBusy(user.id),
     callsEnabled: (await getSettings()).callsEnabled,
@@ -160,6 +162,13 @@ webRouter.get("/app/api/state", async (req, res) => {
       ...m,
       time: fmtDate(m.created_at),
       files: files.filter((f) => f.message_id === m.id).map((f) => ({ id: f.id, type: f.content_type })),
+    })),
+    numbers: numbers.map((n) => ({
+      id: n.id,
+      name: n.name,
+      phone: formatPhone(n.phone),
+      callbackAllowed: n.callback_allowed,
+      lastCalled: fmtDate(n.last_called_at),
     })),
     tasks: tasks.map((t) => ({
       id: t.id,
@@ -169,6 +178,24 @@ webRouter.get("/app/api/state", async (req, res) => {
       time: fmtDate(t.created_at),
     })),
   });
+});
+
+/** Clear the user's number list: hidden from them, and call-backs off until they call a number again. */
+webRouter.post("/app/api/numbers/clear", async (req, res) => {
+  res.json({ ok: true, cleared: await clearUserNumbers(req.user!.id) });
+});
+
+/** Allow or stop call-backs from one of the user's numbers. */
+webRouter.post("/app/api/numbers/:id", async (req, res) => {
+  const result = await setCallbackAllowed(Number(req.params.id), req.body?.allowed === true, req.user!.id);
+  if (result === "not_found") return void res.status(404).json({ error: "That number isn't on your list." });
+  res.json({ ok: true });
+});
+
+/** Start a fresh chat. The old one is kept for the admin; the number list is cleared too. */
+webRouter.post("/app/api/chat/clear", async (req, res) => {
+  await clearChat(req.user!);
+  res.json({ ok: true });
 });
 
 webRouter.post("/app/api/messages", async (req, res) => {
@@ -197,7 +224,7 @@ const INLINE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/web
 webRouter.get("/app/files/:id", async (req, res) => {
   const file = await queryOne<Attachment>(
     `SELECT a.* FROM attachments a JOIN messages m ON m.id = a.message_id JOIN conversations c ON c.id = m.conversation_id
-     WHERE a.id = $1 AND c.user_id = $2 AND c.kind = 'user_web'`,
+     WHERE a.id = $1 AND c.user_id = $2 AND c.kind = 'user_web' AND c.cleared_at IS NULL`,
     [Number(req.params.id), req.user!.id],
   );
   if (!file) return void res.sendStatus(404);
@@ -209,7 +236,7 @@ webRouter.get("/app/files/:id", async (req, res) => {
 
 /** Transcript and recording of the calls made for one of the user's tasks. */
 webRouter.get("/app/tasks/:id", async (req, res) => {
-  const task = await queryOne<Task>("SELECT * FROM tasks WHERE id = $1 AND user_id = $2", [Number(req.params.id), req.user!.id]);
+  const task = await visibleTask(req.user!.id, Number(req.params.id));
   if (!task) return void res.status(404).send(simplePage("Not found", "That call doesn't exist."));
   const calls = await query<Conversation>("SELECT * FROM conversations WHERE task_id = $1 ORDER BY id", [task.id]);
   const transcripts = await Promise.all(calls.map(async (c) => ({ call: c, lines: await listMessages(c.id) })));
@@ -218,9 +245,10 @@ webRouter.get("/app/tasks/:id", async (req, res) => {
 
 webRouter.get("/app/recordings/:id.mp3", async (req, res) => {
   const call = await queryOne<Conversation>(
-    "SELECT c.* FROM conversations c JOIN tasks t ON t.id = c.task_id WHERE c.id = $1 AND t.user_id = $2",
-    [Number(req.params.id), req.user!.id],
+    "SELECT * FROM conversations WHERE id = $1",
+    [Number(req.params.id)],
   );
+  if (!call?.task_id || !(await visibleTask(req.user!.id, call.task_id))) return void res.sendStatus(404);
   if (!call?.recording_sid) return void res.sendStatus(404);
   const upstream = await fetchRecording(call.recording_sid);
   if (!upstream.ok) return void res.sendStatus(502);

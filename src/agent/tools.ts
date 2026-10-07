@@ -4,6 +4,7 @@ import {
   finishTask,
   placeTaskCall,
   recentTasks,
+  visibleTask,
   startCallTask,
   TaskError,
 } from "../tasks.js";
@@ -27,8 +28,8 @@ async function guard(fn: () => Promise<string>): Promise<string> {
 }
 
 async function ownTask(user: User, taskId: unknown): Promise<Task> {
-  const task = await getTask(Number(taskId));
-  if (!task || task.user_id !== user.id) throw new TaskError(`No task #${taskId} found for you.`);
+  const task = await visibleTask(user.id, Number(taskId));
+  if (!task) throw new TaskError(`No task #${taskId} found for you.`);
   return task;
 }
 

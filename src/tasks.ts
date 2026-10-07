@@ -12,6 +12,7 @@ import {
 } from "./db/index.js";
 import { countryOf, formatPhone, toE164 } from "./phone.js";
 import { twilioClient } from "./twilio.js";
+import { recordCalledNumber } from "./numbers.js";
 import { getSettings } from "./settings.js";
 
 export class TaskError extends Error {}
@@ -77,6 +78,7 @@ export async function startCallTask(user: User, input: {
 }): Promise<Task> {
   const phone = await checkOutboundAllowed(user, input.phone);
   const task = await createTask(user, { kind: "call", phone, targetName: input.recipientName, objective: input.objective, context: input.context });
+  await recordCalledNumber(user.id, phone, input.recipientName);
   await placeTaskCall(task, user);
   return task;
 }
@@ -138,26 +140,29 @@ export async function notifyUser(user: User, body: string): Promise<void> {
 /** Each invited user has one long-running web chat thread with the agent. */
 export async function userChatConversation(user: User): Promise<Conversation> {
   const existing = await queryOne<Conversation>(
-    "SELECT * FROM conversations WHERE kind = 'user_web' AND user_id = $1 ORDER BY id DESC LIMIT 1",
+    "SELECT * FROM conversations WHERE kind = 'user_web' AND user_id = $1 AND cleared_at IS NULL ORDER BY id DESC LIMIT 1",
     [user.id],
   );
   return existing ?? createConversation({ kind: "user_web", userId: user.id, counterpartPhone: user.phone ?? "", direction: "inbound" });
 }
 
-/** How long after a task the person we called can still call back about it. */
-const TASK_CALLBACK_WINDOW = "30 days";
-
-export async function latestTaskForNumber(phone: string): Promise<Task | undefined> {
-  return queryOne<Task>(
-    `SELECT * FROM tasks WHERE target_phone = $1 AND status <> 'cancelled'
-       AND created_at > now() - interval '${TASK_CALLBACK_WINDOW}'
-     ORDER BY id DESC LIMIT 1`,
-    [phone],
+/** A user's tasks since they last cleared their chat (what they and their agent see). */
+export async function recentTasks(userId: number, limit = 10): Promise<Task[]> {
+  return query<Task>(
+    `SELECT t.* FROM tasks t JOIN users u ON u.id = t.user_id
+     WHERE t.user_id = $1 AND (u.chat_cleared_at IS NULL OR t.created_at > u.chat_cleared_at)
+     ORDER BY t.id DESC LIMIT $2`,
+    [userId, limit],
   );
 }
 
-export async function recentTasks(userId: number, limit = 10): Promise<Task[]> {
-  return query<Task>("SELECT * FROM tasks WHERE user_id = $1 ORDER BY id DESC LIMIT $2", [userId, limit]);
+/** One of the user's tasks, if it's still visible to them (created since their last clear). */
+export async function visibleTask(userId: number, taskId: number): Promise<Task | undefined> {
+  return queryOne<Task>(
+    `SELECT t.* FROM tasks t JOIN users u ON u.id = t.user_id
+     WHERE t.id = $1 AND t.user_id = $2 AND (u.chat_cleared_at IS NULL OR t.created_at > u.chat_cleared_at)`,
+    [taskId, userId],
+  );
 }
 
 export function describeTask(t: Task): string {

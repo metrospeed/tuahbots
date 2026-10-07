@@ -522,3 +522,97 @@ test("an answered outbound call plays the configured greeting, unless calls were
     body: "enabled=1",
   });
 });
+
+test("numbers panel: call-back toggles, clearing locks them, calling again unlocks, clearing chat keeps admin history", { skip: !enabled }, async () => {
+  const { recordCalledNumber } = await import("../src/numbers.js");
+  const admin = await login();
+  const invite = await fetch(`${base}/admin/users`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: admin },
+    body: new URLSearchParams({ name: "Nora Numbers", phone: "" }),
+  });
+  const link = /https:\/\/agent\.test(\/join\/[A-Za-z0-9_-]+)/.exec(await invite.text())![1];
+  const cookie = await createLogin(link, "nora@example.com", "nora password 1");
+  const user = (await db.query("SELECT * FROM users WHERE email = 'nora@example.com'"))[0];
+
+  // Two numbers the agent called for Nora.
+  const A = "+14155550301";
+  const B = "+14155550302";
+  for (const [phone, name] of [[A, "Bakery"], [B, "Plumber"]]) {
+    await db.query("INSERT INTO tasks (user_id, kind, target_phone, target_name, objective, status) VALUES ($1, 'call', $2, $3, 'Ask a question', 'completed')", [user.id, phone, name]);
+    await recordCalledNumber(user.id, phone, name);
+  }
+  const api = (path: string, body: object = {}) =>
+    fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json", Cookie: cookie }, body: JSON.stringify(body) });
+  const state = async () => (await fetch(`${base}/app/api/state`, { headers: { Cookie: cookie } })).json();
+  const callFrom = async (from: string, sid: string) => (await twilioPost("/twilio/voice", { From: from, CallSid: sid })).text();
+
+  let s = await state();
+  assert.deepEqual(s.numbers.map((n: any) => [n.name, n.callbackAllowed]), [["Plumber", true], ["Bakery", true]]);
+  const idOf = (name: string) => s.numbers.find((n: any) => n.name === name).id;
+  const bakery = idOf("Bakery");
+  const plumber = idOf("Plumber");
+
+  // Allowed numbers get through when they call back; turned-off ones don't.
+  assert.match(await callFrom(A, "CAnum1"), /<Stream/);
+  assert.equal((await api(`/app/api/numbers/${bakery}`, { allowed: false })).status, 200);
+  assert.match(await callFrom(A, "CAnum2"), /only takes calls from invited users/);
+  assert.match(await callFrom(B, "CAnum3"), /<Stream/);
+  // Other users' numbers can't be toggled.
+  const otherUser = (await db.query("INSERT INTO users (name) VALUES ('Other Person') RETURNING id"))[0];
+  const other = (await db.query("INSERT INTO user_numbers (user_id, phone) VALUES ($1, '+14155550399') RETURNING id", [otherUser.id]))[0];
+  assert.equal((await api(`/app/api/numbers/${other.id}`, { allowed: true })).status, 404);
+
+  // Clearing the list: gone from Nora's view, locked off, still visible to the admin.
+  assert.equal((await api("/app/api/numbers/clear")).status, 200);
+  s = await state();
+  assert.deepEqual(s.numbers, []);
+  assert.match(await callFrom(B, "CAnum4"), /only takes calls from invited users/);
+  assert.equal((await api(`/app/api/numbers/${plumber}`, { allowed: true })).status, 404);
+  const adminToggle = await fetch(`${base}/admin/numbers/${plumber}`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: admin },
+    body: "allowed=1",
+  });
+  assert.equal(adminToggle.status, 409);
+  const adminPage = await (await fetch(`${base}/admin/numbers`, { headers: { Cookie: admin } })).text();
+  assert.match(adminPage, /Plumber/);
+  assert.match(adminPage, /Locked off/);
+  assert.match(adminPage, /Removed from their list/);
+
+  // Nora asks the agent to call the plumber again: back on her list, call-back on.
+  await recordCalledNumber(user.id, B, "");
+  s = await state();
+  assert.deepEqual(s.numbers.map((n: any) => [n.name, n.callbackAllowed]), [["Plumber", true]]);
+  assert.match(await callFrom(B, "CAnum5"), /<Stream/);
+  // The bakery stays locked: only calling it again would unlock it.
+  assert.match(await callFrom(A, "CAnum6"), /only takes calls from invited users/);
+
+  // Clear chat: fresh thread, calls and numbers gone for Nora, all kept for the admin.
+  await api("/app/api/messages", { text: "Call the plumber again tomorrow" });
+  for (let i = 0; i < 50 && (await state()).messages.length < 2; i++) await new Promise((r) => setTimeout(r, 50));
+  const oldConversation = (await db.query("SELECT id FROM conversations WHERE user_id = $1 AND kind = 'user_web' AND cleared_at IS NULL", [user.id]))[0].id;
+  const oldTask = (await db.query("SELECT id FROM tasks WHERE user_id = $1 LIMIT 1", [user.id]))[0].id;
+  assert.equal((await fetch(`${base}/app/tasks/${oldTask}`, { headers: { Cookie: cookie } })).status, 200);
+
+  assert.equal((await api("/app/api/chat/clear")).status, 200);
+  s = await state();
+  assert.deepEqual(s.messages, []);
+  assert.deepEqual(s.tasks, []);
+  assert.deepEqual(s.numbers, []);
+  assert.match(await callFrom(B, "CAnum7"), /only takes calls from invited users/);
+  assert.equal((await fetch(`${base}/app/tasks/${oldTask}`, { headers: { Cookie: cookie } })).status, 404);
+
+  const kept = await db.query("SELECT count(*)::int AS n FROM messages WHERE conversation_id = $1", [oldConversation]);
+  assert.ok(kept[0].n >= 2, "old chat is kept");
+  const adminChat = await (await fetch(`${base}/admin/conversations/${oldConversation}`, { headers: { Cookie: admin } })).text();
+  assert.match(adminChat, /Call the plumber again tomorrow/);
+  assert.match(adminChat, /Cleared by the user/);
+
+  // New messages go to a fresh thread.
+  await api("/app/api/messages", { text: "Hello again" });
+  for (let i = 0; i < 50 && (await state()).messages.length < 1; i++) await new Promise((r) => setTimeout(r, 50));
+  s = await state();
+  assert.equal(s.messages[0].body, "Hello again");
+});

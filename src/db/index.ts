@@ -32,6 +32,7 @@ export interface User {
   session_version: number;
   email: string | null;
   password_hash: string | null;
+  chat_cleared_at: Date | null;
   created_at: Date;
 }
 
@@ -66,6 +67,7 @@ export interface Conversation {
   started_at: Date;
   ended_at: Date | null;
   last_activity_at: Date;
+  cleared_at: Date | null;
 }
 
 export type MessageRole = "user" | "counterpart" | "assistant" | "event";
@@ -133,4 +135,16 @@ export async function listMessages(conversationId: number, limit = 500): Promise
     `SELECT * FROM (SELECT * FROM messages WHERE conversation_id = $1 ORDER BY id DESC LIMIT $2) m ORDER BY id`,
     [conversationId, limit],
   );
+}
+
+export interface UserNumber {
+  id: number;
+  user_id: number;
+  phone: string;
+  name: string;
+  callback_allowed: boolean;
+  callback_locked: boolean;
+  hidden: boolean;
+  last_called_at: Date;
+  created_at: Date;
 }
