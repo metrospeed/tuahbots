@@ -237,12 +237,18 @@ adminRouter.get("/admin/users", async (req, res) => {
   const error = typeof req.query.error === "string" ? req.query.error : "";
   const rows = users
     .map(
-      (u) => `<tr><td>${esc(u.name)}</td>
+      (u) => `<tr><td>${esc(u.name)}<div class="small ${u.password_hash ? "muted" : "bad"}">${
+        u.password_hash ? esc(u.email ?? "") : u.login_token_hash ? "Invite not used yet" : "No login"
+      }</div></td>
       <td><form method="post" action="/admin/users/${u.id}/details" class="row">
         <input name="phone" value="${esc(u.phone ? formatPhone(u.phone) : "")}" placeholder="Phone (optional)" size="14">
         <textarea name="notes" rows="2" cols="30" placeholder="Background the agent should know">${esc(u.notes)}</textarea><button>Save</button></form></td>
       <td class="${u.active ? "ok" : "bad"}">${u.active ? "Active" : "Disabled"}</td>
-      <td><form class="inline" method="post" action="/admin/users/${u.id}/link" onsubmit="return confirm('Make a new invite link for ${esc(u.name)}? Their old link stops working and they are signed out everywhere.')"><button>New invite link</button></form>
+      <td><form class="inline" method="post" action="/admin/users/${u.id}/link" onsubmit="return confirm('${
+        u.password_hash
+          ? `Make a password reset link for ${esc(u.name)}? They are signed out everywhere until they use it.`
+          : `Make a new invite link for ${esc(u.name)}? Any earlier link stops working.`
+      }')"><button>${u.password_hash ? "Reset link" : "New invite link"}</button></form>
       <form class="inline" method="post" action="/admin/users/${u.id}/toggle"><button>${u.active ? "Disable" : "Enable"}</button></form>
       <form class="inline" method="post" action="/admin/users/${u.id}/delete" onsubmit="return confirm('Delete ${esc(u.name)}? Their tasks are deleted too; transcripts are kept.')"><button>Delete</button></form></td></tr>`,
     )
@@ -256,9 +262,9 @@ adminRouter.get("/admin/users", async (req, res) => {
         <label>Name<input name="name" required></label>
         <label>Phone (optional)<input name="phone" placeholder="(555) 123-4567"></label>
         <button class="primary">Create invite link</button></form>
-       <p class="small muted">Invited people use the agent from a private web page; you'll get a link to send them however you like.
+       <p class="small muted">Invited people use the agent from a private web page. You'll get a one-time link to send them; they use it to create their login. There's no public sign-up.
        If you add their phone number, they can also call ${esc(formatPhone(config.twilio.phoneNumber))} to talk to the agent.</p></div>
-       <div class="card">${users.length ? `<table><tr><th>Name</th><th>Phone and notes for the agent</th><th>Status</th><th></th></tr>${rows}</table>` : `<p class="muted">Nobody invited yet.</p>`}</div>`,
+       <div class="card">${users.length ? `<table><tr><th>Name and login</th><th>Phone and notes for the agent</th><th>Status</th><th></th></tr>${rows}</table>` : `<p class="muted">Nobody invited yet.</p>`}</div>`,
       "/admin/users",
     ),
   );
@@ -267,8 +273,12 @@ adminRouter.get("/admin/users", async (req, res) => {
 function inviteLinkPage(user: User, link: string): string {
   return layout(
     "Invite link",
-    `<div class="card"><h3>Invite link for ${esc(user.name)}</h3>
-     <p>Send this link to ${esc(user.name)}. Opening it signs them in on that device. It's shown only once; anyone with it can use the agent as them, so send it privately.</p>
+    `<div class="card"><h3>${user.password_hash ? "Password reset link" : "Invite link"} for ${esc(user.name)}</h3>
+     <p>Send this link to ${esc(user.name)}. ${
+       user.password_hash
+         ? "It lets them choose a new password."
+         : "It lets them create their login (email and password), then they sign in at /login."
+     } It works once and is shown only here, so send it privately: whoever opens it first gets the account.</p>
      <div class="row"><input id="link" value="${esc(link)}" readonly style="flex:1;min-width:260px">
      <button class="primary" onclick="navigator.clipboard.writeText(document.getElementById('link').value);this.textContent='Copied'">Copy</button></div>
      <p><a href="/admin/users">← Back to invited users</a></p></div>`,

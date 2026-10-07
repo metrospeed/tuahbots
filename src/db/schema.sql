@@ -13,6 +13,9 @@ ALTER TABLE users ALTER COLUMN phone DROP NOT NULL;
 -- signs the user out everywhere (new link, disabled user).
 ALTER TABLE users ADD COLUMN IF NOT EXISTS login_token_hash TEXT UNIQUE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 1;
+-- Email + password login, created by the user from their invite link.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT UNIQUE;          -- lowercased
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;          -- scrypt, see src/web/passwords.ts
 
 CREATE TABLE IF NOT EXISTS blocked_numbers (
   phone       TEXT PRIMARY KEY,

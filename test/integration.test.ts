@@ -225,14 +225,18 @@ test("invited users chat on the web via their invite link", { skip: !enabled }, 
   });
   const link = /https:\/\/agent\.test(\/join\/[A-Za-z0-9_-]+)/.exec(await invite.text())![1];
 
-  // Not signed in yet; a forged link doesn't work.
-  assert.equal((await fetch(`${base}/app`)).status, 401);
+  // Not signed in yet: the app sends you to sign in; a forged link doesn't work.
+  const signedOut = await fetch(`${base}/app`, { redirect: "manual" });
+  assert.equal(signedOut.status, 302);
+  assert.equal(signedOut.headers.get("location"), "/login?next=%2Fapp");
   assert.equal((await fetch(`${base}/join/forged`)).status, 404);
 
-  const join = await fetch(base + link, { redirect: "manual" });
-  assert.equal(join.status, 302);
-  assert.equal(join.headers.get("location"), "/app");
-  const userCookie = join.headers.get("set-cookie")!.split(";")[0];
+  // The invite link opens a form to create a login; it doesn't sign you in by itself.
+  const form = await fetch(base + link, { redirect: "manual" });
+  assert.equal(form.status, 200);
+  assert.equal(form.headers.get("set-cookie"), null);
+  assert.match(await form.text(), /Create your login|Welcome, Web/);
+  const userCookie = await createLogin(link, "web@example.com", "correct horse battery");
 
   const page = await fetch(`${base}/app`, { headers: { Cookie: userCookie } });
   assert.equal(page.status, 200);
@@ -271,11 +275,136 @@ test("invited users chat on the web via their invite link", { skip: !enabled }, 
   const fileId = state.messages[0].files[0].id;
   assert.equal((await fetch(`${base}/app/files/${fileId}`, { headers: { Cookie: userCookie } })).status, 200);
 
-  // A new invite link signs the old session out.
-  const userId = (await db.query("SELECT id FROM users WHERE name = 'Web Only'"))[0].id;
-  await fetch(`${base}/admin/users/${userId}/link`, { method: "POST", headers: { Cookie: cookie } });
-  assert.equal((await fetch(`${base}/app/api/state`, { headers: { Cookie: userCookie } })).status, 401);
-  assert.equal((await fetch(base + link, { redirect: "manual" })).status, 404);
+  // The invite link was used up when the login was created.
+  assert.equal((await fetch(base + link)).status, 404);
+});
+
+/** Fill in an invite or reset link's form; returns the signed-in cookie. */
+async function createLogin(link: string, email: string, password: string, confirm = password, headers: Record<string, string> = {}): Promise<string> {
+  const res = await fetch(base + link, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", ...headers },
+    body: new URLSearchParams({ email, password, confirm }),
+  });
+  assert.equal(res.status, 302, await res.text());
+  assert.equal(res.headers.get("location"), "/app");
+  return res.headers.get("set-cookie")!.split(";")[0];
+}
+
+async function signIn(email: string, password: string, extra: Record<string, string> = {}): Promise<Response> {
+  return fetch(`${base}/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", ...extra },
+    body: new URLSearchParams({ email, password, next: "/app" }),
+  });
+}
+
+test("invite-only login: create from invite, sign in, change password, reset", { skip: !enabled }, async () => {
+  const admin = await login();
+  const invite = await fetch(`${base}/admin/users`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: admin },
+    body: new URLSearchParams({ name: "Sam Login", phone: "" }),
+  });
+  const link = /https:\/\/agent\.test(\/join\/[A-Za-z0-9_-]+)/.exec(await invite.text())![1];
+
+  // There's no public sign-up: only the invite form can create a login.
+  assert.equal((await fetch(`${base}/signup`)).status, 404);
+
+  // The form validates input and keeps emails unique.
+  const short = await fetch(base + link, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ email: "sam@example.com", password: "short", confirm: "short" }),
+  });
+  assert.equal(short.status, 400);
+  assert.match(await short.text(), /at least 10 characters/);
+  await db.query("INSERT INTO users (name, email) VALUES ('Someone Else', 'taken@example.com')");
+  const taken = await fetch(base + link, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ email: "TAKEN@example.com", password: "a long password", confirm: "a long password" }),
+  });
+  assert.match(await taken.text(), /already used/);
+  const crossSite = await fetch(base + link, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: "https://evil.example" },
+    body: new URLSearchParams({ email: "sam@example.com", password: "a long password", confirm: "a long password" }),
+  });
+  assert.equal(crossSite.status, 403);
+
+  // Browsers send an Origin header on form posts; our own origin is accepted.
+  const page = await fetch(base + link);
+  assert.equal(page.headers.get("referrer-policy"), "same-origin");
+  const first = await createLogin(link, " Sam@Example.com ", "first password 123", undefined, { Origin: "https://agent.test" });
+  const row = (await db.query("SELECT email, password_hash, login_token_hash FROM users WHERE name = 'Sam Login'"))[0];
+  assert.equal(row.email, "sam@example.com");
+  assert.match(row.password_hash, /^scrypt\$/);
+  assert.doesNotMatch(row.password_hash, /first password/);
+  assert.equal(row.login_token_hash, null);
+
+  // Sign in from another device; wrong passwords and other sites are refused.
+  assert.equal((await signIn("sam@example.com", "wrong password")).status, 401);
+  assert.equal((await signIn("nobody@example.com", "first password 123")).status, 401);
+  assert.equal((await signIn("sam@example.com", "first password 123", { Origin: "https://evil.example" })).status, 403);
+  const ok = await signIn("SAM@example.com", "first password 123");
+  assert.equal(ok.status, 302);
+  assert.equal(ok.headers.get("location"), "/app");
+  const second = ok.headers.get("set-cookie")!.split(";")[0];
+  assert.equal((await fetch(`${base}/app/api/state`, { headers: { Cookie: second } })).status, 200);
+
+  // Off-site redirects after sign-in are ignored.
+  const sneaky = await fetch(`${base}/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ email: "sam@example.com", password: "first password 123", next: "//evil.example/app" }),
+  });
+  assert.equal(sneaky.headers.get("location"), "/app");
+
+  // Changing the password needs the current one, keeps this device, signs out others.
+  const account = (body: Record<string, string>, cookie: string) =>
+    fetch(`${base}/app/account`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      body: new URLSearchParams(body),
+    });
+  const wrongCurrent = await account({ current: "nope nope nope", password: "second password 456", confirm: "second password 456" }, second);
+  assert.match(await wrongCurrent.text(), /Your current password isn&#39;t right/);
+  const changed = await account({ current: "first password 123", password: "second password 456", confirm: "second password 456" }, second);
+  assert.match(await changed.text(), /Password changed/);
+  const kept = changed.headers.get("set-cookie")!.split(";")[0];
+  assert.equal((await fetch(`${base}/app/api/state`, { headers: { Cookie: kept } })).status, 200);
+  assert.equal((await fetch(`${base}/app/api/state`, { headers: { Cookie: first } })).status, 401);
+  assert.equal((await signIn("sam@example.com", "first password 123")).status, 401);
+  assert.equal((await signIn("sam@example.com", "second password 456")).status, 302);
+
+  // Admin reset link: signs them out everywhere; the link sets a new password once.
+  const users = await (await fetch(`${base}/admin/users`, { headers: { Cookie: admin } })).text();
+  assert.match(users, /sam@example\.com/);
+  assert.match(users, /Reset link/);
+  const userId = (await db.query("SELECT id FROM users WHERE name = 'Sam Login'"))[0].id;
+  const resetPage = await (await fetch(`${base}/admin/users/${userId}/link`, { method: "POST", headers: { Cookie: admin } })).text();
+  assert.match(resetPage, /Password reset link/);
+  const resetLink = /https:\/\/agent\.test(\/join\/[A-Za-z0-9_-]+)/.exec(resetPage)![1];
+  assert.equal((await fetch(`${base}/app/api/state`, { headers: { Cookie: kept } })).status, 401);
+  assert.match(await (await fetch(base + resetLink)).text(), /Set a new password/);
+  await createLogin(resetLink, "sam@example.com", "third password 789");
+  assert.equal((await signIn("sam@example.com", "third password 789")).status, 302);
+  assert.equal((await fetch(base + resetLink)).status, 404);
+
+  // Disabled users can't sign in.
+  await fetch(`${base}/admin/users/${userId}/toggle`, { method: "POST", headers: { Cookie: admin } });
+  assert.equal((await signIn("sam@example.com", "third password 789")).status, 401);
+});
+
+test("repeated failed sign-ins are throttled", { skip: !enabled }, async () => {
+  let last: Response | undefined;
+  for (let i = 0; i < 11; i++) last = await signIn("throttle@example.com", `wrong ${i}`);
+  assert.equal(last!.status, 429);
+  assert.match(await last!.text(), /Too many attempts/);
 });
 
 test("admin settings control greetings, hours, time limit and the calls switch", { skip: !enabled }, async () => {
