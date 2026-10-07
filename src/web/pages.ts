@@ -70,12 +70,41 @@ button.hbtn{background:none;border:1px solid var(--line);color:var(--muted);bord
 .switch input::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .15s}
 .switch input:checked{background:var(--ok)}.switch input:checked::after{left:16px}
 .switch input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-@media (max-width:760px){.layout{flex-direction:column}aside{width:auto;border-left:0;border-top:1px solid var(--line);max-height:30vh;order:-1}aside.collapsed .list{display:none}aside h3{cursor:pointer;margin:0}aside h3::after{content:" ▾";color:var(--muted)}aside:not(.collapsed) h3{margin-bottom:6px}aside:not(.collapsed) h3::after{content:" ▴"}}
+.menu-btn,.mobile,.backdrop{display:none}
+.menu-btn{position:relative;width:40px;height:40px;margin:-6px 0 -6px -8px;border:0;background:none;color:var(--ink);border-radius:10px;align-items:center;justify-content:center}
+.menu-btn:focus-visible,.close-btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.bars,.bars::before,.bars::after{display:block;width:20px;height:2px;border-radius:2px;background:currentColor;position:relative}
+.bars::before,.bars::after{content:"";position:absolute;left:0}.bars::before{top:-6px}.bars::after{top:6px}
+.menu-btn .badge{position:absolute;top:3px;right:1px;min-width:17px;height:17px;padding:0 4px;border-radius:99px;background:var(--accent);color:var(--accent-ink);font-size:11px;font-weight:700;line-height:17px;text-align:center}
+.drawer-head{align-items:center;justify-content:space-between;gap:10px;margin:-4px 0 14px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.drawer-user{display:flex;flex-direction:column;color:var(--ink);text-decoration:none;font-weight:600;min-width:0;overflow-wrap:anywhere}
+.close-btn{flex:none;width:36px;height:36px;border:1px solid var(--line);background:none;color:var(--muted);border-radius:10px;font-size:16px}
+.drawer-actions{gap:8px;margin-top:20px;padding-top:14px;border-top:1px solid var(--line)}
+.drawer-actions form{margin:0;flex:1}.drawer-actions .hbtn{width:100%;padding:10px;font-size:15px}.drawer-actions>.hbtn{flex:1}
+@media (max-width:760px){
+  .desk{display:none!important}
+  .menu-btn{display:inline-flex}
+  .mobile{display:flex}
+  header{gap:8px}
+  aside{position:fixed;top:0;bottom:0;left:0;z-index:30;width:min(86vw,340px);border-left:0;border-right:1px solid var(--line);
+    padding:calc(14px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
+    transform:translateX(-102%);visibility:hidden;transition:transform .22s ease,visibility 0s linear .22s;box-shadow:0 0 40px rgba(0,0,0,.35)}
+  aside.open{transform:none;visibility:visible;transition:transform .22s ease}
+  .backdrop{display:block;position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.45);opacity:0;pointer-events:none;transition:opacity .22s}
+  .backdrop.show{opacity:1;pointer-events:auto}
+  body.menu-open{overflow:hidden}
+}
+@media (prefers-reduced-motion:reduce){aside,aside.open,.backdrop{transition:none}}
 </style></head>
 <body data-agent="${esc(name)}" data-first="${esc(user.name.split(" ")[0])}">
-<header><span class="title">${esc(name)}</span><a class="who" href="/app/account" title="Account">${esc(user.name)}</a>
-<button type="button" id="clearChat" class="hbtn">Clear chat</button>
-<form method="post" action="/app/logout"><button>Sign out</button></form></header>
+<header>
+<button type="button" class="menu-btn" id="menuOpen" aria-label="Open menu: calls, numbers and account" aria-controls="tasks" aria-expanded="false">
+  <span class="bars" aria-hidden="true"></span><span class="badge" id="menuBadge" hidden></span>
+</button>
+<span class="title">${esc(name)}</span>
+<a class="who desk" href="/app/account" title="Account">${esc(user.name)}</a>
+<button type="button" class="hbtn desk js-clear-chat">Clear chat</button>
+<form method="post" action="/app/logout" class="desk"><button>Sign out</button></form></header>
 ${user.password_hash ? "" : `<div class="setup">You're signed in on this device only. <a href="/app/account">Create a login</a> to sign in anywhere.</div>`}
 <div class="notice" id="callsOff" hidden>Calling is turned off right now. You can still chat, but ${esc(name)} can't place calls.</div>
 <div class="layout">
@@ -90,12 +119,22 @@ ${user.password_hash ? "" : `<div class="setup">You're signed in on this device 
       <button class="iconbtn send" id="send">Send</button>
     </form>
   </section>
-  <aside id="tasks" class="collapsed"><h3 id="tasksToggle">Calls &amp; numbers</h3>
+  <div class="backdrop" id="backdrop"></div>
+  <aside id="tasks" aria-label="Calls and numbers">
+    <div class="drawer-head mobile">
+      <a href="/app/account" class="drawer-user">${esc(user.name)}<span class="muted small">Account</span></a>
+      <button type="button" class="close-btn" id="menuClose" aria-label="Close menu">✕</button>
+    </div>
+    <h3 id="tasksHeading">Calls &amp; numbers</h3>
     <div class="list">
       <h4>Your calls</h4><div id="taskList"><p class="muted">No calls yet.</p></div>
       <div class="numhead"><h4>Numbers</h4><button type="button" id="clearNumbers" class="link" hidden>Clear list</button></div>
       <p class="muted small">Numbers ${esc(name)} has called for you. Turn on <b>Call back</b> to let a number call ${esc(name)} back about your request.</p>
       <div id="numberList"><p class="muted">No numbers yet.</p></div>
+    </div>
+    <div class="drawer-actions mobile">
+      <button type="button" class="hbtn js-clear-chat">Clear chat</button>
+      <form method="post" action="/app/logout"><button class="hbtn">Sign out</button></form>
     </div></aside>
 </div>
 <script src="/assets/chat.js" defer></script>

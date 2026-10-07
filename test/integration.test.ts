@@ -321,7 +321,11 @@ test("invited users chat on the web via their invite link", { skip: !enabled }, 
 
   const page = await fetch(`${base}/app`, { headers: { Cookie: userCookie } });
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /Web Only/);
+  const html = await page.text();
+  assert.match(html, /Web Only/);
+  // On phones the calls & numbers sidebar opens from a menu button (and has its own sign-out).
+  assert.match(html, /id="menuOpen"[^>]*aria-controls="tasks"[^>]*aria-expanded="false"/);
+  assert.match(html, /<aside id="tasks"[\s\S]*class="drawer-actions mobile"[\s\S]*action="\/app\/logout"/);
 
   // Uploads are restricted to photos, PDFs and text.
   const bad = await fetch(`${base}/app/api/messages`, {

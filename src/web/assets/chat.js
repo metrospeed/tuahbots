@@ -40,7 +40,10 @@
 
   function renderTasks(tasks) {
     const list = document.getElementById("taskList");
-    document.getElementById("tasksToggle").textContent = tasks.length ? "Calls & numbers (" + tasks.length + ")" : "Calls & numbers";
+    document.getElementById("tasksHeading").textContent = tasks.length ? "Calls & numbers (" + tasks.length + ")" : "Calls & numbers";
+    const badge = document.getElementById("menuBadge");
+    badge.textContent = tasks.length > 99 ? "99+" : String(tasks.length);
+    badge.hidden = !tasks.length;
     list.replaceChildren();
     if (!tasks.length) { list.append(el("p", "muted", "No calls yet.")); return; }
     for (const t of tasks) {
@@ -94,13 +97,47 @@
     if (await post("/app/api/numbers/clear")) { numbersKey = ""; poll(); }
   };
 
-  document.getElementById("clearChat").onclick = async () => {
+  const clearChat = async () => {
     if (!confirm("Clear this chat? " + AGENT + " will forget it and your calls, and your number list is cleared too (those numbers can't call back until you call them again).")) return;
     if (!(await post("/app/api/chat/clear"))) return;
     lastId = 0; first = true; numbersKey = "";
     log.replaceChildren();
+    closeMenu();
     poll();
   };
+  document.querySelectorAll(".js-clear-chat").forEach((b) => { b.onclick = clearChat; });
+
+  // ---- Mobile menu: the calls & numbers sidebar slides in as a drawer. ----
+  const drawer = document.getElementById("tasks");
+  const backdrop = document.getElementById("backdrop");
+  const openBtn = document.getElementById("menuOpen");
+  const closeBtn = document.getElementById("menuClose");
+  const mobile = matchMedia("(max-width: 760px)");
+  function openMenu() {
+    drawer.classList.add("open");
+    backdrop.classList.add("show");
+    document.body.classList.add("menu-open");
+    openBtn.setAttribute("aria-expanded", "true");
+    drawer.setAttribute("role", "dialog");
+    drawer.setAttribute("aria-modal", "true");
+    closeBtn.focus();
+  }
+  function closeMenu() {
+    if (!drawer.classList.contains("open")) return;
+    drawer.classList.remove("open");
+    backdrop.classList.remove("show");
+    document.body.classList.remove("menu-open");
+    openBtn.setAttribute("aria-expanded", "false");
+    drawer.removeAttribute("role");
+    drawer.removeAttribute("aria-modal");
+    if (mobile.matches) openBtn.focus();
+  }
+  openBtn.onclick = openMenu;
+  closeBtn.onclick = closeMenu;
+  backdrop.onclick = closeMenu;
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+  drawer.addEventListener("click", (e) => { if (e.target.closest("a[href]")) closeMenu(); });
+  mobile.addEventListener("change", () => { if (!mobile.matches) closeMenu(); });
 
   function setTyping(on) {
     document.getElementById("typing")?.remove();
@@ -160,7 +197,6 @@
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing && matchMedia("(pointer:fine)").matches) { e.preventDefault(); send(); }
   });
   document.getElementById("composer").onsubmit = (e) => { e.preventDefault(); send(); };
-  document.getElementById("tasksToggle").onclick = () => document.getElementById("tasks").classList.toggle("collapsed");
   document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
 
   async function send() {
