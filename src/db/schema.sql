@@ -124,3 +124,14 @@ INSERT INTO user_numbers (user_id, phone, name, last_called_at, created_at)
 SELECT DISTINCT ON (user_id, target_phone) user_id, target_phone, target_name, created_at, created_at
 FROM tasks ORDER BY user_id, target_phone, id DESC
 ON CONFLICT (user_id, phone) DO NOTHING;
+
+-- Call recordings copied off Twilio (they're deleted there once stored here).
+CREATE TABLE IF NOT EXISTS recordings (
+  recording_sid      TEXT PRIMARY KEY,
+  conversation_id    INTEGER REFERENCES conversations(id) ON DELETE CASCADE,
+  content_type       TEXT NOT NULL,
+  data               BYTEA NOT NULL,
+  twilio_deleted_at  TIMESTAMPTZ,              -- null until the Twilio copy is deleted
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS recordings_conversation_idx ON recordings (conversation_id);
