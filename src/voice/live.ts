@@ -1,12 +1,11 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
-import type { BetaContentBlockParam } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import OpenAI from "openai";
 import { TranscriptGrouper, type TranscriptSegment } from "openai/lib/live/transcript-grouper";
 import type { ServerEvent, SessionConfig } from "openai/resources/live/live";
 import { LiveWS } from "openai/resources/live/ws";
 import { WebSocket, WebSocketServer } from "ws";
-import { runAgent, type AgentTool } from "../agent/claude.js";
+import { runAgent, type AgentTool, type ContentPart } from "../agent/llm.js";
 import { recentChatContext, taskBrief, userDetails } from "../agent/context.js";
 import {
   LIVE_BACKEND_ADDENDUM,
@@ -27,7 +26,7 @@ import { finalizeCall } from "./summary.js";
  * GPT-Live voice calls. Twilio Media Streams sends the caller's 8 kHz μ-law
  * audio here; we forward it to a GPT-Live session in the same format and play
  * its speech back. GPT-Live handles the conversation itself and delegates
- * tasks (placing calls, pressing keys, hanging up) to us, which Claude
+ * tasks (placing calls, pressing keys, hanging up) to us, which the agent model
  * carries out with the same tools the chat agent uses.
  */
 export const streamServer = new WebSocketServer({ noServer: true });
@@ -62,12 +61,12 @@ class LiveCall {
   private pendingAudio: string[] = [];
   private grouper = new TranscriptGrouper();
   private transcriptDone = false;
-  /** Spoken lines and backend results, in order, for the Claude backend. */
+  /** Spoken lines and backend results, in order, for the agent backend. */
   private transcript: Array<{ id: string; speaker: string; text: string }> = [];
   private backendTools: AgentTool[] = [];
   private backendSystem = "";
   private backendDetails = "";
-  private backendPreamble: BetaContentBlockParam[] = [];
+  private backendPreamble: ContentPart[] = [];
   private delegations: Promise<void> = Promise.resolve();
   private abort = new AbortController();
   private endRequested = false;
@@ -265,7 +264,7 @@ class LiveCall {
     addMessage(this.session.conversationId, role, segment.text.trim()).catch((err) => this.fail("Saving transcript failed", err));
   }
 
-  // ---- Delegations, handled by Claude --------------------------------------
+  // ---- Delegations, handled by the agent model --------------------------------------
 
   private async prepareBackend(): Promise<void> {
     const s = this.session!;
@@ -291,9 +290,9 @@ class LiveCall {
     if (this.closed) return;
     const s = this.session!;
     const transcript = this.transcript.map((l) => `${l.speaker}: ${l.text}`).join("\n");
-    const content: BetaContentBlockParam[] = [
+    const content: ContentPart[] = [
       ...this.backendPreamble,
-      { type: "text", text: `[Call transcript so far:]\n${transcript}\n\n[The voice model just delegated a task based on the end of this conversation. Handle it.]` },
+      { type: "input_text", text: `[Call transcript so far:]\n${transcript}\n\n[The voice model just delegated a task based on the end of this conversation. Handle it.]` },
     ];
 
     let result: string;
@@ -311,7 +310,7 @@ class LiveCall {
       if (run.toolCalls.length) await addMessage(s.conversationId, "event", `Backend ran ${run.toolCalls.join(", ")}`);
     } catch (err) {
       if (this.closed) return;
-      this.fail("Claude backend failed", err);
+      this.fail("Agent backend failed", err);
       result = "That didn't work because of a technical problem. Apologize and offer to try again or follow up by text.";
     }
 

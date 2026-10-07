@@ -1,4 +1,4 @@
-import { complete } from "../agent/claude.js";
+import { complete } from "../agent/llm.js";
 import { CALL_SUMMARY_PROMPT } from "../agent/prompts.js";
 import { getTask, listMessages, query, queryOne, type Conversation } from "../db/index.js";
 import { withLock } from "../lock.js";

@@ -6,5 +6,4 @@ process.env.TWILIO_AUTH_TOKEN ??= "test-auth-token";
 process.env.TWILIO_PHONE_NUMBER ??= "+15005550006";
 process.env.ADMIN_PASSWORD ??= "admin-pass";
 process.env.SESSION_SECRET ??= "session-secret";
-process.env.ANTHROPIC_API_KEY ??= "sk-test";
 process.env.OPENAI_API_KEY ??= "sk-openai-test";

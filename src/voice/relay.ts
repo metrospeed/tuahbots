@@ -1,8 +1,7 @@
 import type { IncomingMessage } from "node:http";
-import type { BetaContentBlockParam, BetaMessageParam } from "@anthropic-ai/sdk/resources/beta/messages/messages";
-import Anthropic from "@anthropic-ai/sdk";
+import { APIUserAbortError } from "openai";
 import { WebSocket, WebSocketServer } from "ws";
-import { runAgent, type AgentTool } from "../agent/claude.js";
+import { runAgent, type AgentTool, type InputItem } from "../agent/llm.js";
 import { recentChatContext, taskBrief, userDetails } from "../agent/context.js";
 import { taskCallPrompt, USER_ASSISTANT_PROMPT, USER_VOICE_ADDENDUM } from "../agent/prompts.js";
 import { taskCallTools, userTools, type CallControls } from "../agent/tools.js";
@@ -29,7 +28,7 @@ export function handleRelayUpgrade(req: IncomingMessage, socket: import("node:st
 const CHARS_PER_SECOND = 14;
 
 class RelayCall {
-  private messages: BetaMessageParam[] = [];
+  private messages: InputItem[] = [];
   private system = "";
   private systemDetails = "";
   private tools: AgentTool[] = [];
@@ -163,7 +162,7 @@ class RelayCall {
           if (result.text) await addMessage(this.session.conversationId, "assistant", result.text);
           if (this.endRequested) this.hangUpAfterSpeech(result.text);
         } catch (err) {
-          if (!(err instanceof Anthropic.APIUserAbortError)) {
+          if (!(err instanceof APIUserAbortError)) {
             console.error("Voice agent failed", err);
             this.send({ type: "text", token: "Sorry, I'm having trouble on my end. Could you say that again?", last: true });
             continue;
@@ -182,19 +181,13 @@ class RelayCall {
   }
 
   private appendUser(text: string): void {
-    const last = this.messages[this.messages.length - 1];
-    if (last?.role === "user") {
-      const content: BetaContentBlockParam[] = typeof last.content === "string" ? [{ type: "text", text: last.content }] : last.content;
-      content.push({ type: "text", text });
-      last.content = content;
-    } else {
-      this.messages.push({ role: "user", content: text });
-    }
+    this.messages.push({ role: "user", content: text });
   }
 
+  /** Record what was actually said before an interruption, unless the turn already landed. */
   private appendAssistant(text: string): void {
     const last = this.messages[this.messages.length - 1];
-    if (last?.role === "user") this.messages.push({ role: "assistant", content: text });
+    if (last && "role" in last && last.role === "user") this.messages.push({ role: "assistant", content: text });
   }
 
   private hangUpAfterSpeech(lastText: string): void {

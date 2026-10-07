@@ -8,11 +8,12 @@ function optional(name: string, fallback: string): string {
   return process.env[name] || fallback;
 }
 
-const voiceEngine = optional("VOICE_ENGINE", "gpt-live");
-if (voiceEngine !== "gpt-live" && voiceEngine !== "claude-relay") {
-  throw new Error(`VOICE_ENGINE must be "gpt-live" or "claude-relay", got "${voiceEngine}"`);
+// "claude-relay" is the old name for "relay".
+const voiceEngine = optional("VOICE_ENGINE", "gpt-live").replace(/^claude-relay$/, "relay");
+if (voiceEngine !== "gpt-live" && voiceEngine !== "relay") {
+  throw new Error(`VOICE_ENGINE must be "gpt-live" or "relay", got "${voiceEngine}"`);
 }
-if (voiceEngine === "gpt-live") required("OPENAI_API_KEY");
+required("OPENAI_API_KEY");
 
 export const config = {
   port: Number(optional("PORT", "3000")),
@@ -30,9 +31,9 @@ export const config = {
   },
 
   voice: {
-    // "gpt-live": OpenAI GPT-Live speaks on calls and hands tasks to Claude.
-    // "claude-relay": Twilio ConversationRelay speech <-> Claude text.
-    engine: optional("VOICE_ENGINE", "gpt-live") as "gpt-live" | "claude-relay",
+    // "gpt-live": OpenAI GPT-Live speaks on calls and hands tasks to the agent model.
+    // "relay": Twilio ConversationRelay speech <-> agent model text.
+    engine: voiceEngine as "gpt-live" | "relay",
     // Twilio <Say> voice for the fixed recording disclosure played before GPT-Live joins.
     disclosureVoice: optional("DISCLOSURE_VOICE", "Polly.Joanna-Neural"),
   },
@@ -42,9 +43,6 @@ export const config = {
     liveVoice: optional("OPENAI_LIVE_VOICE", "marin"),
   },
 
-  anthropic: {
-    model: optional("ANTHROPIC_MODEL", "claude-opus-5-5"),
-  },
 
   admin: {
     password: required("ADMIN_PASSWORD"),
@@ -52,6 +50,8 @@ export const config = {
   },
 
   agent: {
+    // OpenAI model behind the chat agent, call agents and call summaries.
+    model: optional("AGENT_MODEL", "gpt-6-luna"),
     // Name the assistant introduces itself with.
     name: optional("AGENT_NAME", "Tuah"),
     defaultCountry: optional("DEFAULT_COUNTRY", "US"),

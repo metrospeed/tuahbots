@@ -2,7 +2,7 @@ import "./env.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-const { validateInput } = await import("../src/agent/claude.js");
+const { validateInput } = await import("../src/agent/llm.js");
 const { toE164 } = await import("../src/phone.js");
 const { withLock } = await import("../src/lock.js");
 const { createRelaySession, takeRelaySession } = await import("../src/voice/sessions.js");
@@ -18,7 +18,8 @@ test("toE164 normalizes US numbers and rejects junk", () => {
 test("validateInput checks required fields and types", () => {
   const tool = {
     name: "t",
-    input_schema: {
+    description: "test tool",
+    parameters: {
       type: "object" as const,
       properties: { phone: { type: "string" }, task_id: { type: "integer" } },
       required: ["phone"],
@@ -27,7 +28,7 @@ test("validateInput checks required fields and types", () => {
   assert.equal(validateInput(tool, { phone: "1" }), null);
   assert.match(validateInput(tool, {})!, /Missing required field "phone"/);
   assert.match(validateInput(tool, { phone: "1", task_id: 1.5 })!, /integer/);
-  assert.match(validateInput(tool, "nope")!, /INVALID_JSON/);
+  assert.match(validateInput(tool, "nope")!, /JSON object/);
 });
 
 test("withLock serializes work per key", async () => {

@@ -34,7 +34,7 @@ export const CALL_SUMMARY_PROMPT = `You summarize phone calls an AI assistant ma
 
 // ---- GPT-Live voice calls --------------------------------------------------
 // GPT-Live does the talking; anything that needs tools is delegated to a
-// Claude backend, whose short result comes back for GPT-Live to relay.
+// backend agent (GPT-6 Luna), whose short result comes back for GPT-Live to relay.
 
 const LIVE_STYLE = `You are speaking on a live phone call. Sound natural and warm, keep turns short, and let the other person finish. Never read out lists, markdown, or URLs. A recording and AI disclosure has already been played at the start of the call; if asked, confirm honestly that you are an AI assistant and that the call is recorded.`;
 

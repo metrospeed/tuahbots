@@ -7,7 +7,7 @@ import {
   startCallTask,
   TaskError,
 } from "../tasks.js";
-import type { AgentTool } from "./claude.js";
+import type { AgentTool } from "./llm.js";
 
 /** Hooks a live phone call provides to its agent. */
 export interface CallControls {
@@ -41,7 +41,7 @@ export function userTools(user: User, conversationId: number, call?: CallControl
         name: "call_number",
         description:
           "Place a phone call to a third party on the user's behalf. A separate voice agent conducts the call using only the brief you provide, and a summary is posted to the user's chat afterwards. The call opens with an AI and recording disclosure.",
-        input_schema: {
+        parameters: {
           type: "object",
           properties: {
             phone: str("Phone number to call, as given by the user."),
@@ -69,7 +69,7 @@ export function userTools(user: User, conversationId: number, call?: CallControl
       definition: {
         name: "list_tasks",
         description: "List the user's recent call tasks with their status and results.",
-        input_schema: { type: "object", properties: {}, additionalProperties: false },
+        parameters: { type: "object", properties: {}, additionalProperties: false },
       },
       run: async () => {
         const tasks = await recentTasks(user.id);
@@ -81,7 +81,7 @@ export function userTools(user: User, conversationId: number, call?: CallControl
         name: "followup_task",
         description:
           "Follow up on an earlier call with new instructions or answers from the user. Places a new call to the same number, with the earlier objective and result in the brief.",
-        input_schema: {
+        parameters: {
           type: "object",
           properties: {
             task_id: { type: "integer", description: "The task number." },
@@ -109,7 +109,7 @@ export function userTools(user: User, conversationId: number, call?: CallControl
       definition: {
         name: "cancel_task",
         description: "Stop tracking a task, e.g. one the user no longer cares about.",
-        input_schema: {
+        parameters: {
           type: "object",
           properties: { task_id: { type: "integer", description: "The task number." } },
           required: ["task_id"],
@@ -133,7 +133,7 @@ function endCallTool(call: CallControls): AgentTool {
     definition: {
       name: "end_call",
       description: "Hang up after you've said goodbye.",
-      input_schema: {
+      parameters: {
         type: "object",
         properties: { reason: str("Why the call is ending.") },
         required: ["reason"],
@@ -155,7 +155,7 @@ export function taskCallTools(call: CallControls): AgentTool[] {
       definition: {
         name: "press_digits",
         description: "Press keypad digits to navigate a phone menu. Allowed characters: 0-9, *, #, and w (half-second pause).",
-        input_schema: {
+        parameters: {
           type: "object",
           properties: { digits: str("Digits to press, e.g. \"2\" or \"1w2#\".") },
           required: ["digits"],

@@ -11,8 +11,8 @@ const enabled = !!process.env.TEST_DATABASE_URL;
 const fakeLive = new WebSocketServer({ port: 0 });
 await new Promise((resolve) => fakeLive.once("listening", resolve));
 process.env.OPENAI_BASE_URL = `http://127.0.0.1:${(fakeLive.address() as AddressInfo).port}/v1`;
-// Claude is unreachable in tests; the call should still recover gracefully.
-process.env.ANTHROPIC_BASE_URL = "http://127.0.0.1:9";
+// The fake server also answers the agent model's HTTP requests with an error
+// (426 Upgrade Required), so the app's failure handling is exercised too.
 const liveConnections: Array<{ ws: WebSocket; path: string; received: any[] }> = [];
 fakeLive.on("connection", (ws, req) => {
   const conn = { ws, path: req.url ?? "", received: [] as any[] };
@@ -224,7 +224,7 @@ test("invited users chat on the web via their invite link", { skip: !enabled }, 
   });
   assert.equal(sent.status, 200);
 
-  // Claude is unreachable in tests, so the agent answers with an apology.
+  // The agent model errors in tests, so the agent answers with an apology.
   let state: any;
   for (let i = 0; i < 100; i++) {
     state = await (await fetch(`${base}/app/api/state`, { headers: { Cookie: userCookie } })).json();
