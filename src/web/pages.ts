@@ -58,11 +58,23 @@ aside h3{margin:0 0 10px;font-size:15px}
 .task{display:block;text-decoration:none;color:inherit;padding:10px 0;border-bottom:1px solid var(--line)}
 .task .top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;font-weight:500}.task .top>span:first-child{min-width:0;overflow-wrap:anywhere}
 .task .obj{color:var(--muted);font-size:13px;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.muted{color:var(--muted);font-size:14px}
+.muted{color:var(--muted);font-size:14px}.small{font-size:12px}
+aside h4{margin:14px 0 4px;font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.numhead{display:flex;justify-content:space-between;align-items:baseline;margin-top:18px}.numhead h4{margin:0}
+button.link{background:none;border:0;color:var(--accent);padding:0;font-size:13px}
+button.hbtn{background:none;border:1px solid var(--line);color:var(--muted);border-radius:8px;padding:4px 10px;font-size:14px}
+.num{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)}
+.num .who{min-width:0}.num .nm{font-weight:500;overflow-wrap:anywhere}.num .ph{color:var(--muted);font-size:13px}
+.switch{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);flex:none;cursor:pointer}
+.switch input{appearance:none;width:34px;height:20px;border-radius:99px;background:var(--line);position:relative;cursor:pointer;margin:0;transition:background .15s}
+.switch input::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .15s}
+.switch input:checked{background:var(--ok)}.switch input:checked::after{left:16px}
+.switch input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 @media (max-width:760px){.layout{flex-direction:column}aside{width:auto;border-left:0;border-top:1px solid var(--line);max-height:30vh;order:-1}aside.collapsed .list{display:none}aside h3{cursor:pointer;margin:0}aside h3::after{content:" ▾";color:var(--muted)}aside:not(.collapsed) h3{margin-bottom:6px}aside:not(.collapsed) h3::after{content:" ▴"}}
 </style></head>
 <body>
 <header><span class="title">${esc(name)}</span><a class="who" href="/app/account" title="Account">${esc(user.name)}</a>
+<button type="button" id="clearChat" class="hbtn">Clear chat</button>
 <form method="post" action="/app/logout"><button>Sign out</button></form></header>
 ${user.password_hash ? "" : `<div class="setup">You're signed in on this device only. <a href="/app/account">Create a login</a> to sign in anywhere.</div>`}
 <div class="notice" id="callsOff" hidden>Calling is turned off right now. You can still chat, but ${esc(name)} can't place calls.</div>
@@ -78,7 +90,13 @@ ${user.password_hash ? "" : `<div class="setup">You're signed in on this device 
       <button class="iconbtn send" id="send">Send</button>
     </form>
   </section>
-  <aside id="tasks" class="collapsed"><h3 id="tasksToggle">Your calls</h3><div class="list" id="taskList"><p class="muted">No calls yet.</p></div></aside>
+  <aside id="tasks" class="collapsed"><h3 id="tasksToggle">Calls &amp; numbers</h3>
+    <div class="list">
+      <h4>Your calls</h4><div id="taskList"><p class="muted">No calls yet.</p></div>
+      <div class="numhead"><h4>Numbers</h4><button type="button" id="clearNumbers" class="link" hidden>Clear list</button></div>
+      <p class="muted small">Numbers ${esc(name)} has called for you. Turn on <b>Call back</b> to let a number call ${esc(name)} back about your request.</p>
+      <div id="numberList"><p class="muted">No numbers yet.</p></div>
+    </div></aside>
 </div>
 <script>
 (() => {
@@ -116,7 +134,7 @@ ${user.password_hash ? "" : `<div class="setup">You're signed in on this device 
 
   function renderTasks(tasks) {
     const list = document.getElementById("taskList");
-    document.getElementById("tasksToggle").textContent = tasks.length ? "Your calls (" + tasks.length + ")" : "Your calls";
+    document.getElementById("tasksToggle").textContent = tasks.length ? "Calls & numbers (" + tasks.length + ")" : "Calls & numbers";
     list.replaceChildren();
     if (!tasks.length) { list.append(el("p", "muted", "No calls yet.")); return; }
     for (const t of tasks) {
@@ -126,6 +144,57 @@ ${user.password_hash ? "" : `<div class="setup">You're signed in on this device 
       list.append(a);
     }
   }
+
+  let numbersKey = "";
+  function renderNumbers(numbers) {
+    const key = JSON.stringify(numbers);
+    if (key === numbersKey) return;
+    numbersKey = key;
+    const list = document.getElementById("numberList");
+    document.getElementById("clearNumbers").hidden = !numbers.length;
+    list.replaceChildren();
+    if (!numbers.length) { list.append(el("p", "muted", "No numbers yet.")); return; }
+    for (const n of numbers) {
+      const row = el("div", "num");
+      const who = el("div", "who");
+      who.append(el("div", "nm", n.name || n.phone), el("div", "ph", (n.name ? n.phone + " · " : "") + "last called " + n.lastCalled));
+      const label = el("label", "switch");
+      const box = el("input");
+      box.type = "checkbox"; box.setAttribute("role", "switch"); box.checked = n.callbackAllowed;
+      box.setAttribute("aria-label", "Allow " + (n.name || n.phone) + " to call back");
+      box.onchange = async () => {
+        errorBox.textContent = "";
+        const res = await fetch("/app/api/numbers/" + n.id, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ allowed: box.checked }),
+        }).catch(() => null);
+        if (!res || !res.ok) { box.checked = !box.checked; errorBox.textContent = "Couldn't change that. Try again."; return; }
+        numbersKey = "";
+      };
+      label.append(box, el("span", null, "Call back"));
+      row.append(who, label);
+      list.append(row);
+    }
+  }
+
+  async function post(url) {
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => null);
+    if (res?.status === 401) { location.reload(); return false; }
+    if (!res || !res.ok) { errorBox.textContent = "Something went wrong. Try again."; return false; }
+    return true;
+  }
+
+  document.getElementById("clearNumbers").onclick = async () => {
+    if (!confirm("Clear your number list? These numbers won't be able to call back until you ask ${esc(name)} to call them again.")) return;
+    if (await post("/app/api/numbers/clear")) { numbersKey = ""; poll(); }
+  };
+
+  document.getElementById("clearChat").onclick = async () => {
+    if (!confirm("Clear this chat? ${esc(name)} will forget it and your calls, and your number list is cleared too (those numbers can't call back until you call them again).")) return;
+    if (!(await post("/app/api/chat/clear"))) return;
+    lastId = 0; first = true; numbersKey = "";
+    log.replaceChildren();
+    poll();
+  };
 
   function setTyping(on) {
     document.getElementById("typing")?.remove();
@@ -151,6 +220,7 @@ ${user.password_hash ? "" : `<div class="setup">You're signed in on this device 
       document.getElementById("callsOff").hidden = state.callsEnabled !== false;
       setTyping(busy);
       renderTasks(state.tasks);
+      renderNumbers(state.numbers || []);
       showEmpty();
       if (first || nearBottom || state.messages.some((m) => m.role === "user")) log.scrollTop = log.scrollHeight;
       first = false;

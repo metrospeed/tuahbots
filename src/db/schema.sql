@@ -97,3 +97,30 @@ CREATE TABLE IF NOT EXISTS settings (
   value       JSONB NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Clearing a chat starts a new thread; the old one is kept (marked) for the admin.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS cleared_at TIMESTAMPTZ;
+-- Users only see (and the agent only recalls) tasks created after their last clear.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS chat_cleared_at TIMESTAMPTZ;
+
+-- Numbers each user's agent has called, and whether those numbers may call back.
+-- hidden: removed from the user's list (they cleared it). locked: call-back is
+-- forced off until the user asks the agent to call the number again.
+CREATE TABLE IF NOT EXISTS user_numbers (
+  id               SERIAL PRIMARY KEY,
+  user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  phone            TEXT NOT NULL,
+  name             TEXT NOT NULL DEFAULT '',
+  callback_allowed BOOLEAN NOT NULL DEFAULT TRUE,
+  callback_locked  BOOLEAN NOT NULL DEFAULT FALSE,
+  hidden           BOOLEAN NOT NULL DEFAULT FALSE,
+  last_called_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (user_id, phone)
+);
+CREATE INDEX IF NOT EXISTS user_numbers_phone_idx ON user_numbers (phone);
+-- Numbers called before this table existed.
+INSERT INTO user_numbers (user_id, phone, name, last_called_at, created_at)
+SELECT DISTINCT ON (user_id, target_phone) user_id, target_phone, target_name, created_at, created_at
+FROM tasks ORDER BY user_id, target_phone, id DESC
+ON CONFLICT (user_id, phone) DO NOTHING;

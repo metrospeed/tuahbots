@@ -1,8 +1,9 @@
 import express from "express";
 import { config } from "../config.js";
-import { listMessages, pool, query, queryOne, type Attachment, type Conversation, type Task, type User } from "../db/index.js";
+import { listMessages, pool, query, queryOne, type Attachment, type Conversation, type Task, type User, type UserNumber } from "../db/index.js";
 import { formatPhone, toE164 } from "../phone.js";
 import { issueInviteLink } from "../web/auth.js";
+import { setCallbackAllowed } from "../numbers.js";
 import { fetchRecording } from "../twilio.js";
 import {
   checkPassword,
@@ -98,7 +99,7 @@ adminRouter.get("/admin/conversations", async (req, res) => {
         .map(
           (c) => `<tr>
         <td class="small"><a href="/admin/conversations/${c.id}">${esc(fmtDate(c.last_activity_at))}</a></td>
-        <td><span class="badge">${esc(KIND_LABELS[c.kind])}</span>${c.recording_sid ? ` <span title="Recorded">🎙</span>` : ""}
+        <td><span class="badge">${esc(KIND_LABELS[c.kind])}</span>${c.cleared_at ? ` <span class="badge" title="The user cleared this chat; it's kept here">cleared by user</span>` : ""}${c.recording_sid ? ` <span title="Recorded">🎙</span>` : ""}
           ${c.call_status ? `<div class="small ${statusClass(c.call_status)}">${esc(c.call_status)}</div>` : ""}</td>
         <td>${esc(c.user_name ?? "")}</td>
         <td>${c.kind.startsWith("user") ? "" : `${esc(c.target_name ?? "")} <span class="muted small">${esc(formatPhone(c.counterpart_phone))}</span>`}</td>
@@ -154,6 +155,7 @@ adminRouter.get("/admin/conversations/:id", async (req, res) => {
 
   const info = [
     `<b>${esc(KIND_LABELS[c.kind])}</b> · ${c.direction} · ${esc(formatPhone(c.counterpart_phone))}`,
+    c.cleared_at ? `<span class="muted">Cleared by the user ${esc(fmtDate(c.cleared_at))}. They no longer see it; it's kept here.</span>` : "",
     c.user_name ? `Invited user: ${esc(c.user_name)}` : "",
     c.call_status ? `Call status: <span class="${statusClass(c.call_status)}">${esc(c.call_status)}</span>` : "",
     `Started ${esc(fmtDate(c.started_at))}${c.ended_at ? ` · ended ${esc(fmtDate(c.ended_at))}` : ""}`,
@@ -481,3 +483,62 @@ async function endActiveCalls(): Promise<number> {
   }
   return ended;
 }
+
+// ---- Numbers -------------------------------------------------------------
+
+adminRouter.get("/admin/numbers", async (req, res) => {
+  const filter = req.query.status;
+  const rows = await query<UserNumber & { user_name: string; calls: number }>(
+    `SELECT n.*, u.name AS user_name,
+       (SELECT count(*)::int FROM tasks t WHERE t.user_id = n.user_id AND t.target_phone = n.phone) AS calls
+     FROM user_numbers n JOIN users u ON u.id = n.user_id
+     ORDER BY n.last_called_at DESC LIMIT 500`,
+  );
+  const shown = rows.filter((n) =>
+    filter === "allowed" ? n.callback_allowed && !n.callback_locked : filter === "locked" ? n.callback_locked : true,
+  );
+  const status = (n: UserNumber) =>
+    n.callback_locked
+      ? `<span class="bad">Locked off</span><div class="small muted">User cleared it; stays off until they ask the agent to call it again.</div>`
+      : n.callback_allowed
+        ? `<span class="ok">Call back allowed</span>`
+        : `<span class="muted">Call back off</span>`;
+  const table = shown.length
+    ? `<table><tr><th>Number</th><th>User</th><th>Last called</th><th>Calls</th><th>Call back</th><th></th></tr>${shown
+        .map(
+          (n) => `<tr>
+        <td>${esc(n.name || "")}<div class="${n.name ? "small muted" : ""}">${esc(formatPhone(n.phone))}</div></td>
+        <td>${esc(n.user_name)}${n.hidden ? `<div class="small muted">Removed from their list</div>` : ""}</td>
+        <td class="small">${esc(fmtDate(n.last_called_at))}</td>
+        <td>${n.calls}</td>
+        <td>${status(n)}</td>
+        <td>${
+          n.callback_locked
+            ? ""
+            : `<form class="inline" method="post" action="/admin/numbers/${n.id}">
+                <input type="hidden" name="allowed" value="${n.callback_allowed ? "0" : "1"}">
+                <button>${n.callback_allowed ? "Turn off" : "Allow"}</button></form>`
+        }</td></tr>`,
+        )
+        .join("")}</table>`
+    : `<p class="muted">No numbers${filter ? " match" : " yet"}.</p>`;
+  const tab = (value: string, label: string) =>
+    `<a href="/admin/numbers${value ? `?status=${value}` : ""}" class="badge"${(filter ?? "") === value ? ' style="outline:2px solid var(--accent)"' : ""}>${label}</a>`;
+  res.send(
+    layout(
+      "Numbers",
+      `<div class="card"><h3>Numbers called for users</h3>
+       <p class="small muted">Every number the agent has called on someone's behalf. When a number calls back, the agent only answers if at least one user still allows it.
+       Numbers a user cleared stay here and are locked off until that user asks the agent to call them again.</p>
+       <p>${tab("", "All")} ${tab("allowed", "Call back allowed")} ${tab("locked", "Locked off")}</p></div>
+       <div class="card">${table}</div>`,
+      "/admin/numbers",
+    ),
+  );
+});
+
+adminRouter.post("/admin/numbers/:id", async (req, res) => {
+  const result = await setCallbackAllowed(Number(req.params.id), req.body.allowed === "1");
+  if (result === "locked") return void res.status(409).send(layout("Locked", `<div class="card">That number was cleared by its user and stays off until they ask the agent to call it again. <a href="/admin/numbers">Back</a></div>`));
+  res.redirect("/admin/numbers");
+});

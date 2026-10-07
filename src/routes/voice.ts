@@ -12,7 +12,8 @@ import {
   type Conversation,
 } from "../db/index.js";
 import { toE164 } from "../phone.js";
-import { finishTask, latestTaskForNumber } from "../tasks.js";
+import { callbackTaskForNumber } from "../numbers.js";
+import { finishTask } from "../tasks.js";
 import { requireTwilioSignature } from "../twilio.js";
 import { connectCall } from "../voice/connect.js";
 import { dropPrewarmedCall } from "../voice/live.js";
@@ -48,7 +49,8 @@ async function inboundCallTwiml(from: string, callSid: string): Promise<string> 
   }
 
   // A third party calling back about something we contacted them about.
-  const task = (await isBlocked(from)) ? undefined : await latestTaskForNumber(from);
+  // Only numbers that some user still allows to call back get through.
+  const task = (await isBlocked(from)) ? undefined : await callbackTaskForNumber(from);
   const requester = task && (await getUser(task.user_id));
   if (task && requester?.active) {
     const conversation = await createConversation({

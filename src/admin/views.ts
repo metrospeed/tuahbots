@@ -22,6 +22,7 @@ const NAV = [
   ["/admin/conversations", "Transcripts"],
   ["/admin/tasks", "Tasks"],
   ["/admin/users", "Invited users"],
+  ["/admin/numbers", "Numbers"],
   ["/admin/blocked", "Blocked numbers"],
   ["/admin/settings", "Settings"],
 ];
