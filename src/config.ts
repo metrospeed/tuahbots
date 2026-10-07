@@ -28,6 +28,8 @@ export const config = {
     // Set to "false" only for local testing behind a tunnel that rewrites URLs.
     validateSignatures: optional("TWILIO_VALIDATE_SIGNATURES", "true") !== "false",
     ttsVoice: optional("TWILIO_TTS_VOICE", ""),
+    // Only changed in tests, to point recording downloads/deletes at a fake.
+    apiBaseUrl: optional("TWILIO_API_BASE_URL", "https://api.twilio.com").replace(/\/$/, ""),
   },
 
   voice: {

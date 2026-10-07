@@ -5,7 +5,7 @@ import { formatPhone } from "../phone.js";
 import { getSettings } from "../settings.js";
 import { clearChat, clearUserNumbers, listUserNumbers, setCallbackAllowed } from "../numbers.js";
 import { recentTasks, userChatConversation, visibleTask } from "../tasks.js";
-import { fetchRecording } from "../twilio.js";
+import { sendRecording } from "../recordings.js";
 import {
   changePassword,
   checkLogin,
@@ -250,8 +250,6 @@ webRouter.get("/app/recordings/:id.mp3", async (req, res) => {
   );
   if (!call?.task_id || !(await visibleTask(req.user!.id, call.task_id))) return void res.sendStatus(404);
   if (!call?.recording_sid) return void res.sendStatus(404);
-  const upstream = await fetchRecording(call.recording_sid);
-  if (!upstream.ok) return void res.sendStatus(502);
-  res.type("audio/mpeg").send(Buffer.from(await upstream.arrayBuffer()));
+  await sendRecording(req, res, call.recording_sid);
 });
 

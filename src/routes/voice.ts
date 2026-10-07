@@ -14,6 +14,7 @@ import {
 import { toE164 } from "../phone.js";
 import { callbackTaskForNumber } from "../numbers.js";
 import { finishTask } from "../tasks.js";
+import { archiveRecording } from "../recordings.js";
 import { requireTwilioSignature } from "../twilio.js";
 import { connectCall } from "../voice/connect.js";
 import { dropPrewarmedCall } from "../voice/live.js";
@@ -147,9 +148,15 @@ voiceRouter.post("/twilio/voice/status", requireTwilioSignature, async (req, res
 
 voiceRouter.post("/twilio/voice/recording", requireTwilioSignature, async (req, res) => {
   res.sendStatus(204);
-  await query("UPDATE conversations SET recording_sid = $2, recording_duration = $3 WHERE call_sid = $1", [
-    req.body.CallSid,
-    req.body.RecordingSid,
-    Number(req.body.RecordingDuration ?? 0),
-  ]).catch((err) => console.error("Recording callback failed", err));
+  try {
+    const recordingSid = String(req.body.RecordingSid ?? "");
+    const rows = await query<{ id: number }>(
+      "UPDATE conversations SET recording_sid = $2, recording_duration = $3 WHERE call_sid = $1 RETURNING id",
+      [req.body.CallSid, recordingSid, Number(req.body.RecordingDuration ?? 0)],
+    );
+    // Copy it to our database, then delete it from Twilio. Failures are retried by the sweeper.
+    if (recordingSid && req.body.RecordingStatus !== "failed") await archiveRecording(recordingSid, rows[0]?.id ?? null);
+  } catch (err) {
+    console.error("Recording callback failed", err);
+  }
 });

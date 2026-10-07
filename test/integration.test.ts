@@ -27,6 +27,31 @@ const fakeOpenAI = http.createServer((req, res) => {
   });
 });
 const fakeLive = new WebSocketServer({ server: fakeOpenAI });
+
+// A stand-in for Twilio's recordings API: download (.mp3) and delete (.json).
+const twilioRecordings = new Map<string, Buffer>();
+const twilioDeletes: string[] = [];
+let failNextDelete = false;
+const fakeTwilio = http.createServer((req, res) => {
+  const m = /\/Recordings\/(\w+)\.(mp3|json)$/.exec(req.url ?? "");
+  const sid = m?.[1] ?? "";
+  if (m && req.method === "GET" && m[2] === "mp3" && twilioRecordings.has(sid)) {
+    res.writeHead(200, { "Content-Type": "audio/mpeg" });
+    return void res.end(twilioRecordings.get(sid));
+  }
+  if (m && req.method === "DELETE" && m[2] === "json") {
+    if (failNextDelete) {
+      failNextDelete = false;
+      return void res.writeHead(500).end();
+    }
+    twilioDeletes.push(sid);
+    const existed = twilioRecordings.delete(sid);
+    return void res.writeHead(existed ? 204 : 404).end();
+  }
+  res.writeHead(404).end();
+});
+await new Promise<void>((resolve) => fakeTwilio.listen(0, resolve));
+process.env.TWILIO_API_BASE_URL = `http://127.0.0.1:${(fakeTwilio.address() as AddressInfo).port}`;
 await new Promise<void>((resolve) => fakeOpenAI.listen(0, resolve));
 process.env.OPENAI_BASE_URL = `http://127.0.0.1:${(fakeOpenAI.address() as AddressInfo).port}/v1`;
 const liveConnections: Array<{ ws: WebSocket; path: string; received: any[] }> = [];
@@ -57,6 +82,7 @@ after(async () => {
   fakeLive.close();
   fakeOpenAI.closeAllConnections();
   fakeOpenAI.close();
+  fakeTwilio.close();
   if (!enabled) return;
   server.close();
   await db.pool.end();
@@ -615,4 +641,58 @@ test("numbers panel: call-back toggles, clearing locks them, calling again unloc
   for (let i = 0; i < 50 && (await state()).messages.length < 1; i++) await new Promise((r) => setTimeout(r, 50));
   s = await state();
   assert.equal(s.messages[0].body, "Hello again");
+});
+
+test("recordings are copied to our database, then deleted from Twilio; failures are retried", { skip: !enabled }, async () => {
+  const { sweepRecordings } = await import("../src/recordings.js");
+  const admin = await login();
+  const conversation = (
+    await db.query("INSERT INTO conversations (kind, counterpart_phone, direction, call_sid) VALUES ('task_call', '+14155550400', 'outbound', 'CArec') RETURNING id")
+  )[0];
+  const audio = Buffer.alloc(3000, 7);
+  twilioRecordings.set("RE1", audio);
+  const stored = async (sid: string) => (await db.query("SELECT length(data) AS size, twilio_deleted_at FROM recordings WHERE recording_sid = $1", [sid]))[0];
+  const waitFor = async (check: () => Promise<boolean>) => {
+    for (let i = 0; i < 100 && !(await check()); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(await check());
+  };
+
+  await twilioPost("/twilio/voice/recording", { CallSid: "CArec", RecordingSid: "RE1", RecordingDuration: "12", RecordingStatus: "completed" });
+  await waitFor(async () => !!(await stored("RE1"))?.twilio_deleted_at);
+  assert.equal((await stored("RE1")).size, 3000);
+  assert.ok(!twilioRecordings.has("RE1"), "deleted from Twilio");
+
+  // Playback now comes from our copy (Twilio no longer has it), and supports seeking.
+  const full = await fetch(`${base}/admin/recordings/${conversation.id}.mp3`, { headers: { Cookie: admin } });
+  assert.equal(full.status, 200);
+  assert.equal(full.headers.get("content-type"), "audio/mpeg");
+  assert.deepEqual(Buffer.from(await full.arrayBuffer()), audio);
+  const part = await fetch(`${base}/admin/recordings/${conversation.id}.mp3`, { headers: { Cookie: admin, Range: "bytes=100-199" } });
+  assert.equal(part.status, 206);
+  assert.equal(part.headers.get("content-range"), "bytes 100-199/3000");
+  assert.equal((await part.arrayBuffer()).byteLength, 100);
+
+  // A failed delete keeps our copy and is retried by the sweeper.
+  await db.query("INSERT INTO conversations (kind, counterpart_phone, direction, call_sid) VALUES ('task_call', '+14155550401', 'outbound', 'CArec2')");
+  twilioRecordings.set("RE2", Buffer.alloc(500, 1));
+  failNextDelete = true;
+  await twilioPost("/twilio/voice/recording", { CallSid: "CArec2", RecordingSid: "RE2", RecordingDuration: "3", RecordingStatus: "completed" });
+  await waitFor(async () => !!(await stored("RE2")));
+  assert.equal((await stored("RE2")).twilio_deleted_at, null);
+  assert.ok(twilioRecordings.has("RE2"), "still on Twilio after the failed delete");
+  await sweepRecordings();
+  assert.ok((await stored("RE2")).twilio_deleted_at);
+  assert.ok(!twilioRecordings.has("RE2"));
+
+  // A failed download deletes nothing; the sweeper copies it once it's available.
+  await db.query("INSERT INTO conversations (kind, counterpart_phone, direction, call_sid) VALUES ('task_call', '+14155550402', 'outbound', 'CArec3')");
+  const deletesBefore = twilioDeletes.length;
+  await twilioPost("/twilio/voice/recording", { CallSid: "CArec3", RecordingSid: "RE3", RecordingDuration: "3", RecordingStatus: "completed" });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await stored("RE3"), undefined);
+  assert.equal(twilioDeletes.length, deletesBefore, "nothing deleted without a saved copy");
+  twilioRecordings.set("RE3", Buffer.alloc(800, 2));
+  await sweepRecordings();
+  assert.equal((await stored("RE3")).size, 800);
+  assert.ok(!twilioRecordings.has("RE3"));
 });

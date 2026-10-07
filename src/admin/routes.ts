@@ -4,7 +4,7 @@ import { listMessages, pool, query, queryOne, type Attachment, type Conversation
 import { formatPhone, toE164 } from "../phone.js";
 import { issueInviteLink } from "../web/auth.js";
 import { setCallbackAllowed } from "../numbers.js";
-import { fetchRecording } from "../twilio.js";
+import { sendRecording } from "../recordings.js";
 import {
   checkPassword,
   clearSessionCookie,
@@ -183,10 +183,7 @@ adminRouter.get("/admin/conversations/:id", async (req, res) => {
 adminRouter.get("/admin/recordings/:id.mp3", async (req, res) => {
   const c = await queryOne<Conversation>("SELECT * FROM conversations WHERE id = $1", [Number(req.params.id)]);
   if (!c?.recording_sid) return res.sendStatus(404);
-  const upstream = await fetchRecording(c.recording_sid);
-  if (!upstream.ok || !upstream.body) return res.sendStatus(502);
-  res.type("audio/mpeg");
-  res.send(Buffer.from(await upstream.arrayBuffer()));
+  await sendRecording(req, res, c.recording_sid);
 });
 
 const INLINE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"]);
