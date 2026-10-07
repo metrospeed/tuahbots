@@ -6,7 +6,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json && cp src/db/schema.sql dist/db/schema.sql",
+    "build": "tsc -p tsconfig.json && cp src/db/schema.sql dist/db/schema.sql && mkdir -p dist/web/assets && cp src/web/assets/*.js dist/web/assets/",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -20,6 +20,7 @@
     "libphonenumber-js": "^1.13.14",
     "openai": "^7.30.0",
     "pg": "^8.23.1",
+    "qrcode": "^1.5.4",
     "twilio": "^6.1.2",
     "ws": "^8.22.0"
   },
@@ -27,6 +28,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.4",
     "@types/pg": "^8.23.1",
+    "@types/qrcode": "^1.5.6",
     "@types/ws": "^8.18.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"

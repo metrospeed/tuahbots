@@ -135,3 +135,19 @@ CREATE TABLE IF NOT EXISTS recordings (
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS recordings_conversation_idx ON recordings (conversation_id);
+
+-- Admin sign-in second factor (single row). The TOTP secret is encrypted with
+-- a key derived from SESSION_SECRET; recovery codes are stored as hashes.
+-- Bumping session_version signs out every admin session.
+CREATE TABLE IF NOT EXISTS admin_auth (
+  id                 INTEGER PRIMARY KEY CHECK (id = 1),
+  totp_secret_enc    TEXT,
+  totp_last_counter  BIGINT NOT NULL DEFAULT 0,
+  recovery_hashes    TEXT[] NOT NULL DEFAULT '{}',
+  session_version    INTEGER NOT NULL DEFAULT 1,
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO admin_auth (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+-- Invite/reset links expire; the admin can also revoke them.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS login_token_expires_at TIMESTAMPTZ;

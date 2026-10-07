@@ -17,12 +17,27 @@ export function hashToken(token: string): string {
  */
 export async function issueInviteLink(userId: number): Promise<string> {
   const token = crypto.randomBytes(24).toString("base64url");
-  await query("UPDATE users SET login_token_hash = $2, session_version = session_version + 1 WHERE id = $1", [userId, hashToken(token)]);
+  await query(
+    `UPDATE users SET login_token_hash = $2, login_token_expires_at = now() + interval '${INVITE_DAYS} days',
+       session_version = session_version + 1 WHERE id = $1`,
+    [userId, hashToken(token)],
+  );
   return `${config.publicBaseUrl}/join/${token}`;
 }
 
+/** Invite and reset links stop working after this long (or when revoked). */
+export const INVITE_DAYS = 7;
+
 export async function userForInviteToken(token: string): Promise<User | undefined> {
-  return queryOne<User>("SELECT * FROM users WHERE login_token_hash = $1 AND active", [hashToken(token)]);
+  return queryOne<User>(
+    "SELECT * FROM users WHERE login_token_hash = $1 AND active AND login_token_expires_at > now()",
+    [hashToken(token)],
+  );
+}
+
+/** Make a user's outstanding invite or reset link stop working. */
+export async function revokeInviteLink(userId: number): Promise<void> {
+  await query("UPDATE users SET login_token_hash = NULL, login_token_expires_at = NULL WHERE id = $1", [userId]);
 }
 
 /**
@@ -31,7 +46,8 @@ export async function userForInviteToken(token: string): Promise<User | undefine
  */
 export async function completeInvite(userId: number, email: string, password: string): Promise<User> {
   const user = await queryOne<User>(
-    `UPDATE users SET email = $2, password_hash = $3, login_token_hash = NULL, session_version = session_version + 1
+    `UPDATE users SET email = $2, password_hash = $3, login_token_hash = NULL, login_token_expires_at = NULL,
+       session_version = session_version + 1
      WHERE id = $1 RETURNING *`,
     [userId, email, await hashPassword(password)],
   );

@@ -29,6 +29,7 @@ export interface User {
   notes: string;
   active: boolean;
   login_token_hash: string | null;
+  login_token_expires_at: Date | null;
   session_version: number;
   email: string | null;
   password_hash: string | null;

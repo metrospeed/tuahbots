@@ -98,15 +98,70 @@ async function twilioPost(path: string, params: Record<string, string>): Promise
   });
 }
 
-async function login(): Promise<string> {
+const form = (fields: Record<string, string>) => new URLSearchParams(fields);
+const cookieFrom = (res: Response, name: string) =>
+  (res.headers.getSetCookie?.() ?? [res.headers.get("set-cookie") ?? ""]).map((c) => c.split(";")[0]).find((c) => c.startsWith(`${name}=`))!;
+
+/** The admin's authenticator secret, captured when tests enroll 2FA. */
+let adminTotpSecret = "";
+/** TOTP steps already used: each code works once, so tests move forward (waiting for a new step if needed). */
+let totpStep = 0;
+let adminRecoveryCodes: string[] = [];
+async function nextAdminCode(): Promise<string> {
+  const { totpCode, currentCounter } = await import("../src/admin/totp.js");
+  // The server accepts the current step or the next one, each only once.
+  if (totpStep > currentCounter() + 1) await new Promise((r) => setTimeout(r, 30_050 - (Date.now() % 30_000)));
+  const use = Math.max(currentCounter(), totpStep);
+  totpStep = use + 1;
+  return totpCode(adminTotpSecret, use);
+}
+
+/** Password step: returns the pending cookie and where it redirects. */
+async function adminPassword(password = "admin-pass"): Promise<{ pending: string; location: string; status: number }> {
   const res = await fetch(`${base}/admin/login`, {
     method: "POST",
     redirect: "manual",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ password: "admin-pass" }),
+    body: form({ password }),
   });
-  assert.equal(res.status, 302);
-  return res.headers.get("set-cookie")!.split(";")[0];
+  return { pending: res.status === 302 ? cookieFrom(res, "tuah_admin_pending") : "", location: res.headers.get("location") ?? "", status: res.status };
+}
+
+/** Full admin sign-in (enrolling 2FA the first time); returns the session cookie. */
+let adminSession = "";
+async function signInAdmin(): Promise<string> {
+  const step = await adminPassword();
+  assert.equal(step.status, 302);
+  if (step.location === "/admin/login/setup") {
+    const page = await (await fetch(`${base}/admin/login/setup`, { headers: { Cookie: step.pending } })).text();
+    adminTotpSecret = /<code>([A-Z2-7 ]+)<\/code>/.exec(page)![1].replace(/ /g, "");
+    const candidate = /name="candidate" value="([^"]+)"/.exec(page)![1];
+    const { totpCode, currentCounter } = await import("../src/admin/totp.js");
+    totpStep = currentCounter() + 1;
+    const res = await fetch(`${base}/admin/login/setup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: step.pending },
+      body: form({ candidate, code: totpCode(adminTotpSecret, currentCounter()) }),
+    });
+    assert.equal(res.status, 200);
+    adminRecoveryCodes = [...(await res.clone().text()).matchAll(/<li>([a-z2-7]{5}-[a-z2-7]{5})<\/li>/g)].map((m) => m[1]);
+    return cookieFrom(res, "tuah_admin");
+  }
+  assert.equal(step.location, "/admin/login/code");
+  const res = await fetch(`${base}/admin/login/code`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: step.pending },
+    body: form({ code: await nextAdminCode() }),
+  });
+  assert.equal(res.status, 302, await res.text());
+  return cookieFrom(res, "tuah_admin");
+}
+
+/** An admin session for tests (signed in once, reused). */
+async function login(): Promise<string> {
+  if (!adminSession) adminSession = await signInAdmin();
+  return adminSession;
 }
 
 test("webhooks reject unsigned requests", { skip: !enabled }, async () => {
@@ -695,4 +750,148 @@ test("recordings are copied to our database, then deleted from Twilio; failures 
   await sweepRecordings();
   assert.equal((await stored("RE3")).size, 800);
   assert.ok(!twilioRecordings.has("RE3"));
+});
+
+test("security headers: strict CSP with no inline scripts, no framing, HSTS on HTTPS", { skip: !enabled }, async () => {
+  const admin = await login();
+  for (const [path, cookie] of [["/admin/users", admin], ["/admin/settings", admin], ["/login", ""], ["/admin/login", ""]] as const) {
+    const res = await fetch(base + path, { headers: cookie ? { Cookie: cookie } : {} });
+    const csp = res.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /script-src 'self'(;|$)/, path);
+    assert.match(csp, /frame-ancestors 'none'/, path);
+    assert.equal(res.headers.get("x-frame-options"), "DENY");
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    assert.match(res.headers.get("strict-transport-security") ?? "", /max-age=31536000/);
+    const html = await res.text();
+    assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)/, `${path} has an inline script`);
+    assert.doesNotMatch(html, /\son(submit|click|change|load)=/i, `${path} has an inline event handler`);
+  }
+  const js = await fetch(`${base}/assets/admin.js`);
+  assert.equal(js.status, 200);
+  assert.match(js.headers.get("content-type") ?? "", /javascript/);
+  assert.equal((await fetch(`${base}/assets/chat.js`)).status, 200);
+  assert.equal((await fetch(`${base}/assets/../config.js`)).status, 404);
+});
+
+test("invite links expire after 7 days and can be revoked; names can't inject script into the admin page", { skip: !enabled }, async () => {
+  const admin = await login();
+  const evil = `Eve'); alert(1); ('`;
+  const created = await fetch(`${base}/admin/users`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: admin },
+    body: form({ name: evil, phone: "" }),
+  });
+  const page = await created.text();
+  assert.match(page, /expires in 7 days/);
+  const link = /https:\/\/agent\.test(\/join\/[A-Za-z0-9_-]+)/.exec(page)![1];
+  const row = (await db.query("SELECT id, login_token_expires_at FROM users WHERE name = $1", [evil]))[0];
+  const days = (new Date(row.login_token_expires_at).getTime() - Date.now()) / 86_400_000;
+  assert.ok(days > 6.9 && days <= 7, `expires in ${days} days`);
+
+  // #8: the name only appears HTML-escaped inside data attributes, never in script.
+  const users = await (await fetch(`${base}/admin/users`, { headers: { Cookie: admin } })).text();
+  assert.match(users, /data-confirm="[^"]*Eve&#39;\); alert\(1\); \(&#39;/);
+  assert.doesNotMatch(users, /onsubmit/);
+  assert.match(users, /Invite pending, expires/);
+  assert.match(users, /Revoke link/);
+
+  // Expired links stop working.
+  assert.equal((await fetch(base + link)).status, 200);
+  await db.query("UPDATE users SET login_token_expires_at = now() - interval '1 minute' WHERE id = $1", [row.id]);
+  assert.equal((await fetch(base + link)).status, 404);
+  assert.match(await (await fetch(`${base}/admin/users`, { headers: { Cookie: admin } })).text(), /Invite expired/);
+
+  // A fresh link works until the admin revokes it.
+  const again = await (await fetch(`${base}/admin/users/${row.id}/link`, { method: "POST", headers: { Cookie: admin } })).text();
+  const link2 = /https:\/\/agent\.test(\/join\/[A-Za-z0-9_-]+)/.exec(again)![1];
+  assert.equal((await fetch(base + link2)).status, 200);
+  const revoke = await fetch(`${base}/admin/users/${row.id}/revoke-link`, { method: "POST", redirect: "manual", headers: { Cookie: admin } });
+  assert.equal(revoke.status, 302);
+  assert.equal((await fetch(base + link2)).status, 404);
+  const post = await fetch(base + link2, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: form({ email: "eve@example.com", password: "a long password", confirm: "a long password" }),
+  });
+  assert.equal(post.status, 404);
+});
+
+test("admin two-factor: code required, 30-minute sessions, no code reuse, recovery codes, logout ends all sessions", { skip: !enabled }, async () => {
+  const session = await login();
+  assert.ok(adminRecoveryCodes.length === 8, "recovery codes shown at setup");
+
+  // The password alone isn't enough, and the code step needs the password step first.
+  assert.equal((await adminPassword("wrong")).status, 401);
+  const noPending = await fetch(`${base}/admin/login/code`, { redirect: "manual" });
+  assert.equal(noPending.headers.get("location"), "/admin/login");
+  const step = await adminPassword();
+  assert.equal(step.location, "/admin/login/code");
+  const pendingOnly = await fetch(`${base}/admin/conversations`, { redirect: "manual", headers: { Cookie: step.pending } });
+  assert.equal(pendingOnly.headers.get("location"), "/admin/login");
+  const wrong = await fetch(`${base}/admin/login/code`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: step.pending },
+    body: form({ code: "000000" }),
+  });
+  assert.equal(wrong.status, 401);
+
+  // A correct code gives a 30-minute session; the same code can't be used again.
+  const code = await nextAdminCode();
+  const ok = await fetch(`${base}/admin/login/code`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: step.pending },
+    body: form({ code }),
+  });
+  assert.equal(ok.status, 302);
+  const setCookie = (ok.headers.getSetCookie?.() ?? []).find((c) => c.startsWith("tuah_admin="))!;
+  assert.match(setCookie, /Max-Age=1800/);
+  assert.match(setCookie, /HttpOnly/);
+  const second = cookieFrom(ok, "tuah_admin");
+  const replayStep = await adminPassword();
+  const replay = await fetch(`${base}/admin/login/code`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: replayStep.pending },
+    body: form({ code }),
+  });
+  assert.equal(replay.status, 401, "a used code is rejected");
+
+  // A recovery code works once.
+  const recovery = adminRecoveryCodes[0];
+  const viaRecovery = await fetch(`${base}/admin/login/code`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: replayStep.pending },
+    body: form({ code: recovery }),
+  });
+  assert.equal(viaRecovery.status, 302);
+  const third = cookieFrom(viaRecovery, "tuah_admin");
+  const reuseStep = await adminPassword();
+  const reuse = await fetch(`${base}/admin/login/code`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: reuseStep.pending },
+    body: form({ code: recovery }),
+  });
+  assert.equal(reuse.status, 401);
+
+  // Logging out ends every admin session.
+  for (const c of [session, second, third]) assert.equal((await fetch(`${base}/admin/users`, { redirect: "manual", headers: { Cookie: c } })).status, 200);
+  await fetch(`${base}/admin/logout`, { method: "POST", redirect: "manual", headers: { Cookie: third } });
+  for (const c of [session, second, third]) {
+    assert.equal((await fetch(`${base}/admin/users`, { redirect: "manual", headers: { Cookie: c } })).headers.get("location"), "/admin/login");
+  }
+
+  // Moving to a new phone (needs a current code; a recovery code counts) re-enrolls at next sign-in.
+  adminSession = "";
+  const fresh = await login();
+  const reset = await fetch(`${base}/admin/settings/2fa/reset`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: fresh },
+    body: form({ code: adminRecoveryCodes[1] }),
+  });
+  assert.equal(reset.headers.get("location"), "/admin/login");
+  assert.equal((await adminPassword()).location, "/admin/login/setup");
+  adminSession = "";
+  await login(); // re-enrolls with a new secret for any later tests
 });
