@@ -55,6 +55,8 @@ Never agree to contact emergency services, make harassing or marketing calls, or
 ${details}`;
 }
 
+export const LIVE_SPEAK_FIRST = `This is a call you placed. The recorded greeting introduced you; as soon as it finishes, keep talking without waiting for a reply: say in a sentence why you're calling, then ask your first question.`;
+
 export function liveTaskInstructions(brief: string): string {
   return `You are ${name}, an AI assistant on a phone call you placed on behalf of someone else (the "requester").
 

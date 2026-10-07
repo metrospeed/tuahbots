@@ -19,8 +19,9 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   callsEnabled: true,
+  // No question at the end: the agent continues straight into why it's calling.
   greetingOutbound:
-    "Hi {recipient}, this is {agent}, an AI assistant calling on behalf of {requester}. This call is being recorded and transcribed. Is now a good time for a quick question?",
+    "Hi {recipient}, this is {agent}, an AI assistant calling on behalf of {requester}. This call is being recorded and transcribed.",
   greetingUserInbound: "Hi {caller}, it's {agent}. Just so you know, this call is recorded and transcribed. What can I do for you?",
   greetingCallback:
     "Hi, this is {agent}, an AI assistant for {requester}, following up on our earlier call. This call is recorded and transcribed. How can I help?",
@@ -36,9 +37,14 @@ export const GREETING_PLACEHOLDERS = {
   greetingCallback: ["{agent}", "{requester}"],
 } as const;
 
+/** Earlier default that ended in a question; saved copies are upgraded to the new default. */
+const OLD_OUTBOUND_DEFAULT =
+  "Hi {recipient}, this is {agent}, an AI assistant calling on behalf of {requester}. This call is being recorded and transcribed. Is now a good time for a quick question?";
+
 export async function getSettings(): Promise<Settings> {
   const rows = await query<{ key: string; value: unknown }>("SELECT key, value FROM settings");
   const stored = Object.fromEntries(rows.map((r) => [r.key, r.value])) as Partial<Settings>;
+  if (stored.greetingOutbound === OLD_OUTBOUND_DEFAULT) delete stored.greetingOutbound;
   const merged = { ...DEFAULT_SETTINGS };
   for (const key of Object.keys(DEFAULT_SETTINGS) as Array<keyof Settings>) {
     if (stored[key] !== undefined && typeof stored[key] === typeof DEFAULT_SETTINGS[key]) (merged as any)[key] = stored[key];

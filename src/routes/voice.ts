@@ -99,7 +99,9 @@ voiceRouter.post("/twilio/voice/answered/:conversationId", requireTwilioSignatur
       requester: requester.name,
       recipient: task.target_name || "there",
     });
-    res.type("text/xml").send(connectCall({ mode: "task", conversationId: conversation.id, taskId: task.id, userId: requester.id, greeting }));
+    res
+      .type("text/xml")
+      .send(connectCall({ mode: "task", conversationId: conversation.id, taskId: task.id, userId: requester.id, greeting, speakFirst: true }));
   } catch (err) {
     console.error("Answered-call setup failed", err);
     res.type("text/xml").send("<Response><Hangup/></Response>");

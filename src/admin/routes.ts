@@ -370,7 +370,7 @@ adminRouter.post("/admin/blocked/delete", async (req, res) => {
 // ---- Settings ------------------------------------------------------------
 
 const GREETING_FIELDS: Array<[keyof typeof GREETING_PLACEHOLDERS, string, string]> = [
-  ["greetingOutbound", "Calls the agent places to other people", "Played when the person answers."],
+  ["greetingOutbound", "Calls the agent places to other people", "Played when the person answers. The agent keeps talking right after it, so don't end it with a question."],
   ["greetingUserInbound", "Invited users calling the agent", "Only for users with a phone number on file."],
   ["greetingCallback", "Other people calling back", "When someone the agent called calls the number back."],
 ];

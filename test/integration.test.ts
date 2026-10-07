@@ -5,7 +5,7 @@ import { after, before, test } from "node:test";
 import twilio from "twilio";
 import { WebSocket, WebSocketServer } from "ws";
 import http from "node:http";
-import { functionCall, sendResponseStream, textMessage } from "./fake-openai.js";
+import { functionCall, rejectUnknown, sendResponseStream, textMessage, unknownInputField } from "./fake-openai.js";
 
 const enabled = !!process.env.TEST_DATABASE_URL;
 
@@ -20,6 +20,8 @@ const fakeOpenAI = http.createServer((req, res) => {
     const tools: string[] = (request.tools ?? []).map((t: any) => t.name);
     // Summaries send a plain-string input; tool loops send a list of items.
     const answered = Array.isArray(request.input) && request.input.some((i: any) => i.type === "function_call_output");
+    const unknown = unknownInputField(request);
+    if (unknown) return rejectUnknown(res, unknown);
     if (!tools.includes("end_call")) return void res.writeHead(400).end(JSON.stringify({ error: { message: "test" } }));
     sendResponseStream(res, request.model, answered ? [textMessage("Ending the call.")] : [functionCall("end_call", { reason: "done" })]);
   });
@@ -356,6 +358,28 @@ test("an answered outbound call plays the configured greeting, unless calls were
   const xml = await (await twilioPost(path, { CallSid: "CAout" })).text();
   assert.match(xml, /<Say[^>]*>Hello Mike, Tuah here, an AI assistant for Pat Example\. This call is recorded\.<\/Say>/);
   assert.match(xml, /<Stream url="wss:\/\/agent\.test\/twilio\/stream">/);
+
+  // GPT-Live was started while the greeting played; once the stream attaches
+  // (greeting over), it is told to keep talking instead of waiting for "hello?".
+  const before = liveConnections.length;
+  await new Promise((r) => setTimeout(r, 300));
+  const live = liveConnections[liveConnections.length - 1];
+  assert.ok(liveConnections.length >= before && live.received[0]?.type === "session.start");
+  assert.match(live.received[0].session.instructions, /keep talking without waiting for a reply/);
+  live.ws.send(JSON.stringify({ type: "session.started", event_id: "s1", session: { id: "sess_out", model: "gpt-live-1", status: "active", expires_at: 0 } }));
+  await new Promise((r) => setTimeout(r, 100));
+  assert.ok(!live.received.some((e) => e.type === "session.commentary.append"), "nothing is said while the greeting plays");
+
+  const token = /<Parameter name="token" value="([^"]+)"/.exec(xml)![1];
+  const stream = new WebSocket(`${base.replace("http", "ws")}/twilio/stream`);
+  await new Promise((resolve) => stream.on("open", resolve));
+  stream.send(JSON.stringify({ event: "start", streamSid: "MZout", start: { streamSid: "MZout", callSid: "CAout", customParameters: { token } } }));
+  for (let i = 0; i < 50 && !live.received.some((e) => e.type === "session.commentary.append"); i++) await new Promise((r) => setTimeout(r, 50));
+  const kickoff = live.received.find((e) => e.type === "session.commentary.append");
+  assert.ok(kickoff, "GPT-Live is prompted to speak first");
+  assert.equal(kickoff.delegation_id, null);
+  assert.match(kickoff.content, /Quote status/);
+  stream.close();
 
   await fetch(`${base}/admin/settings/calls`, {
     method: "POST",

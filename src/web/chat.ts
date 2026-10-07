@@ -1,4 +1,4 @@
-import { runAgent } from "../agent/llm.js";
+import { AgentRunError, runAgent } from "../agent/llm.js";
 import { historyFromTranscript, userDetails } from "../agent/context.js";
 import { USER_ASSISTANT_PROMPT } from "../agent/prompts.js";
 import { userTools } from "../agent/tools.js";
@@ -55,7 +55,13 @@ async function answer(user: User, conversationId: number): Promise<void> {
     });
     if (result.text) await addMessage(conversationId, "assistant", result.text);
   } catch (err) {
-    console.error("Chat agent failed", err);
-    await addMessage(conversationId, "assistant", "Sorry, something went wrong on my end. Please try again in a minute.");
+    console.error("Chat agent failed", err instanceof AgentRunError ? err.cause : err);
+    // If tools already ran (e.g. a call was placed), say what happened rather than "nothing worked".
+    const done = err instanceof AgentRunError ? err.toolOutputs.filter((o) => !o.startsWith("Error:")) : [];
+    await addMessage(
+      conversationId,
+      "assistant",
+      done.length ? done.join("\n") : "Sorry, something went wrong on my end. Please try again in a minute.",
+    );
   }
 }
