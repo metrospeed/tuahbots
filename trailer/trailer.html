@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TuahBots Launch Trailer</title>
+<link rel="stylesheet" href="assets/fonts.css">
+<style>
+:root{--navy:#0a0f24;--navy2:#141b3d;--blue:#2563eb;--blue2:#6ea0ff;--yellow:#ffd60a;--pink:#ff3d7f;--green:#22c55e;--ink:#1d2330;--muted:#6b7280;--line:#e3e6ea;--bg:#f4f5f7}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#000;overflow:hidden}
+#viewport{position:absolute;inset:0;display:grid;place-items:center}
+#stage{position:relative;width:1920px;height:1080px;overflow:hidden;background:var(--navy);font-family:Inter,system-ui,sans-serif;color:#fff;transform-origin:center}
+.layer{position:absolute;inset:0}
+.abs{position:absolute}
+.e{display:inline-block;width:1em;height:1em;vertical-align:-.12em}
+.display{font-family:"Archivo Black",Inter,sans-serif;text-transform:uppercase;letter-spacing:-.01em;line-height:.9}
+
+/* background */
+#bg{background:radial-gradient(1200px 800px at 50% 40%,#1b2a6b 0%,var(--navy) 70%)}
+#grid{position:absolute;left:-200px;right:-200px;top:540px;height:900px;transform-origin:50% 0;
+  background-image:linear-gradient(rgba(110,160,255,.35) 2px,transparent 2px),linear-gradient(90deg,rgba(110,160,255,.35) 2px,transparent 2px);
+  background-size:120px 120px;transform:perspective(600px) rotateX(62deg);mask-image:linear-gradient(transparent,#000 30%,#000 70%,transparent)}
+.blob{position:absolute;border-radius:50%;filter:blur(80px);opacity:.55}
+#rays{position:absolute;left:50%;top:50%;width:3000px;height:3000px;margin:-1500px 0 0 -1500px;
+  background:repeating-conic-gradient(rgba(255,214,10,.13) 0 9deg,transparent 9deg 18deg);border-radius:50%}
+
+/* scene A */
+.slam{position:absolute;left:0;right:0;text-align:center;font-size:230px}
+#holdBox{position:absolute;left:50%;top:50%;width:1100px;margin-left:-550px;margin-top:-330px;text-align:center}
+#holdTimer{font-family:"Archivo Black";font-size:210px;color:#fff;letter-spacing:.02em;font-variant-numeric:tabular-nums}
+#holdLabel{font-family:"Archivo Black";font-size:64px;color:var(--pink);letter-spacing:.2em}
+#holdSub{font-size:44px;color:#9aa3b2;font-weight:600;margin-top:18px}
+
+/* scene C logo */
+.wordmark{font-family:"Archivo Black";font-size:250px;letter-spacing:-.02em;white-space:nowrap}
+.wordmark .b{color:var(--yellow)}
+
+/* browser */
+#browser{position:absolute;left:210px;top:110px;width:1500px;height:880px;border-radius:22px;overflow:hidden;background:var(--bg);
+  box-shadow:0 60px 120px rgba(0,0,0,.55),0 0 0 2px rgba(255,255,255,.08);color:var(--ink);font-size:22px;transform-origin:50% 50%}
+.chrome{height:56px;background:#e8eaef;display:flex;align-items:center;gap:12px;padding:0 20px;border-bottom:1px solid #d5d9e0}
+.dot{width:16px;height:16px;border-radius:50%}
+.url{margin-left:24px;flex:1;max-width:620px;height:34px;border-radius:17px;background:#fff;color:#4b5563;font-size:18px;display:flex;align-items:center;padding:0 16px;gap:8px}
+.app-h{display:flex;align-items:center;gap:14px;padding:14px 24px;background:#fff;border-bottom:1px solid var(--line)}
+.app-h .title{font-weight:700;font-size:24px}.app-h .who{margin-left:auto;color:var(--muted);font-size:20px}
+.app-h .so{border:1px solid var(--line);color:var(--muted);border-radius:10px;padding:5px 14px;font-size:18px}
+.app-body{display:flex;height:calc(100% - 56px - 62px)}
+.chat{flex:1;display:flex;flex-direction:column;min-width:0}
+#log{flex:1;overflow:hidden;padding:24px;display:flex;flex-direction:column;justify-content:flex-end;gap:12px}
+.msg{max-width:78%;padding:13px 18px;border-radius:22px;white-space:normal;line-height:1.4;box-shadow:0 1px 1px rgba(0,0,0,.04);transform-origin:bottom right}
+.msg.user{align-self:flex-end;background:var(--blue);color:#fff;border-bottom-right-radius:6px}
+.msg.assistant{align-self:flex-start;background:#fff;border:1px solid var(--line);border-bottom-left-radius:6px;transform-origin:bottom left}
+.msg .time{display:block;font-size:15px;opacity:.65;margin-top:4px}
+.typing{align-self:flex-start;color:var(--muted);font-size:20px;padding:4px 6px}
+.empty{margin:auto;text-align:center;color:var(--muted);max-width:640px;font-size:22px}
+.empty b{color:var(--ink)}
+.chips{display:flex;gap:8px;padding:0 24px;min-height:0}
+.chip{font-size:18px;background:var(--bg);border:1px solid var(--line);border-radius:99px;padding:4px 14px;margin-top:10px;color:var(--ink)}
+.composer{display:flex;gap:10px;align-items:flex-end;padding:14px 24px 18px;border-top:1px solid var(--line);background:#fff}
+.ta{flex:1;min-height:54px;padding:13px 16px;border-radius:18px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font-size:22px;line-height:1.35;white-space:pre-wrap}
+.ta .ph{color:#9aa3b2}
+.caret{display:inline-block;width:2px;height:1.1em;background:var(--blue);vertical-align:-.2em;margin-left:1px}
+.ib{border:1px solid var(--line);background:var(--bg);border-radius:14px;height:54px;min-width:54px;display:grid;place-items:center;font-size:24px;padding:0 16px}
+.send{background:var(--blue);color:#fff;border-color:var(--blue);font-weight:700}
+aside{width:400px;border-left:1px solid var(--line);padding:22px;background:#fff}
+aside h3{margin:0 0 12px;font-size:21px}
+.task{padding:14px 0;border-bottom:1px solid var(--line)}
+.task .top{display:flex;justify-content:space-between;gap:8px;font-weight:600;font-size:20px}
+.task .obj{color:var(--muted);font-size:17px;margin-top:4px}
+.pill{display:inline-block;font-size:15px;padding:2px 10px;border-radius:99px;border:1.5px solid currentColor;white-space:nowrap;font-weight:600}
+.pill.prog{color:#a16207}.pill.done{color:#15803d}
+.muted{color:var(--muted);font-size:18px}
+
+/* quote "photo" */
+.quote{display:block;width:200px;height:250px;background:#fffdf6;border-radius:8px;margin-top:10px;padding:16px 16px;color:#222;font-size:10px;line-height:1.4;transform:rotate(-2deg);box-shadow:0 6px 16px rgba(0,0,0,.25);font-family:Inter}
+.quote .qh{font-family:"Archivo Black";font-size:16px;color:#b91c1c;letter-spacing:.02em}
+.quote .row{display:flex;justify-content:space-between;border-bottom:1px dashed #ccc;padding:4px 0}
+.quote .tot{font-weight:800;font-size:14px;margin-top:6px;display:flex;justify-content:space-between}
+.quote .sig{font-family:"Permanent Marker";font-size:18px;color:#1e40af;margin-top:8px}
+
+/* callouts / tags */
+.tag{position:absolute;left:70px;top:50px;font-family:"Archivo Black";font-size:58px;background:var(--yellow);color:var(--navy);padding:10px 28px 6px;border-radius:14px;box-shadow:8px 8px 0 var(--pink);white-space:nowrap;transform-origin:0 50%}
+.tag .n{display:inline-block;background:var(--navy);color:var(--yellow);border-radius:50%;width:66px;height:66px;line-height:70px;text-align:center;margin-right:16px;font-size:44px;vertical-align:4px}
+.callout{position:absolute;font-family:"Permanent Marker";font-size:46px;color:var(--yellow);white-space:nowrap;background:var(--navy);padding:8px 26px 4px;border-radius:16px;box-shadow:6px 6px 0 var(--pink)}
+#cursor{position:absolute;width:46px;height:46px}
+#ripple{position:absolute;width:120px;height:120px;border-radius:50%;border:6px solid var(--yellow);margin:-60px 0 0 -60px}
+
+/* call scene */
+#phone{position:absolute;left:250px;top:70px;width:500px;height:940px;border-radius:70px;background:#05070f;padding:18px;box-shadow:0 0 0 4px #2b3350,0 50px 120px rgba(0,0,0,.6),0 0 160px rgba(37,99,235,.45)}
+#screen{width:100%;height:100%;border-radius:54px;background:linear-gradient(180deg,#14204f,#0a0f24 60%);position:relative;overflow:hidden;text-align:center}
+#screen .notch{position:absolute;left:50%;top:14px;width:150px;height:36px;margin-left:-75px;border-radius:20px;background:#000}
+.callee{margin-top:120px;font-size:46px;font-weight:800}
+.callee-sub{font-size:24px;color:#9aa3b2;margin-top:6px}
+#ctimer{font-size:30px;color:#cbd5e1;margin-top:18px;font-variant-numeric:tabular-nums}
+#rec{display:inline-flex;align-items:center;gap:8px;margin-top:16px;background:rgba(239,68,68,.15);color:#fca5a5;border:1.5px solid #ef4444;padding:5px 14px;border-radius:99px;font-weight:700;font-size:20px}
+#rec i{width:12px;height:12px;border-radius:50%;background:#ef4444}
+#orb{position:absolute;left:50%;top:560px;width:250px;height:250px;margin:-125px 0 0 -125px;border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,#93b4ff,#2563eb 55%,#1e3a8a);display:grid;place-items:center;box-shadow:0 0 80px rgba(110,160,255,.7)}
+#orb img{width:150px;height:150px}
+.ring{position:absolute;left:50%;top:560px;border-radius:50%;border:4px solid rgba(110,160,255,.7)}
+#bars{position:absolute;left:0;right:0;bottom:120px;height:110px;display:flex;align-items:center;justify-content:center;gap:8px}
+#bars b{display:block;width:12px;border-radius:6px;background:var(--yellow)}
+#endBtn{position:absolute;left:50%;bottom:30px;width:76px;height:76px;margin-left:-38px;border-radius:50%;background:#ef4444;display:grid;place-items:center;font-size:36px}
+#lines{position:absolute;left:880px;top:150px;width:900px}
+.line{position:absolute;left:0;max-width:880px;padding:18px 26px;border-radius:26px;font-size:34px;font-weight:600;line-height:1.3;box-shadow:0 14px 40px rgba(0,0,0,.35)}
+.line .sp{display:block;font-size:20px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;margin-bottom:4px;opacity:.85}
+.line.bot{background:var(--blue);color:#fff;border-bottom-left-radius:8px}
+.line.them{background:#fff;color:var(--ink);border-bottom-left-radius:8px}
+.line.them .sp{color:var(--pink)}
+.badge{position:absolute;display:inline-flex;align-items:center;gap:12px;background:rgba(255,255,255,.1);border:2px solid rgba(255,255,255,.25);padding:10px 22px;border-radius:99px;font-size:28px;font-weight:700;white-space:nowrap;backdrop-filter:blur(6px)}
+
+/* notification */
+#notif{position:absolute;left:1110px;top:40px;width:760px;background:rgba(255,255,255,.96);color:var(--ink);border-radius:28px;padding:20px 26px;display:flex;gap:18px;align-items:center;box-shadow:0 30px 70px rgba(0,0,0,.45)}
+#notif .ic{width:72px;height:72px;border-radius:18px;background:var(--blue);display:grid;place-items:center;flex:none}
+#notif .ic img{width:48px;height:48px}
+#notif b{font-size:24px}#notif div div{font-size:22px;color:#374151}
+
+/* scene G */
+.rf{position:absolute;inset:0;display:grid;place-items:center;text-align:center}
+.rf .w{font-size:190px}
+.rf .em{width:230px;height:230px;display:block;margin:0 auto 20px}
+.stamp{position:absolute;left:50%;top:70%;font-family:"Archivo Black";font-size:110px;color:#fff;border:12px solid #fff;padding:6px 40px 0;border-radius:20px;white-space:nowrap;transform-origin:center}
+
+/* end card */
+#tagline{font-size:72px;font-weight:800;letter-spacing:-.01em}
+.fine{font-size:30px;color:#b8c2d9;font-weight:600;letter-spacing:.02em}
+#flash{background:#fff;pointer-events:none}
+#vignette{background:radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,.55));pointer-events:none}
+</style>
+</head>
+<body>
+<div id="viewport"><div id="stage">
+
+  <div class="layer" id="bg"><div id="rays"></div><div class="blob" id="blob1" style="width:700px;height:700px;background:#2563eb"></div><div class="blob" id="blob2" style="width:600px;height:600px;background:#ff3d7f"></div><div id="grid"></div></div>
+
+  <!-- A: cold open -->
+  <div class="layer" id="sA">
+    <div class="slam display" id="w0" style="top:70px">Hate</div>
+    <div class="slam display" id="w1" style="top:300px;color:var(--yellow)">making</div>
+    <div class="slam display" id="w2" style="top:530px">phone</div>
+    <div class="slam display" id="w3" style="top:760px;color:var(--pink)">calls?</div>
+  </div>
+  <div class="layer" id="sA2">
+    <div id="holdBox">
+      <div id="holdLabel">ON HOLD</div>
+      <div id="holdTimer">00:47:12</div>
+      <div id="holdSub">“Your call is very important to us…”</div>
+    </div>
+    <img class="abs" id="sadEmoji" src="assets/emoji/1f629.svg" style="width:220px;left:1540px;top:120px">
+    <img class="abs" id="skull" src="assets/emoji/23f3.svg" style="width:160px;left:200px;top:700px">
+  </div>
+
+  <!-- B: what if -->
+  <div class="layer" id="sB">
+    <div class="slam display" id="b0" style="top:250px;font-size:170px">What if a bot</div>
+    <div class="slam display" id="b1" style="top:470px;font-size:170px;color:var(--yellow)">made them</div>
+    <div class="slam display" id="b2" style="top:690px;font-size:170px;color:var(--pink)">for you?</div>
+  </div>
+
+  <!-- C: logo drop -->
+  <div class="layer" id="sC">
+    <div class="abs" id="cLogo" style="left:0;right:0;top:300px;text-align:center">
+      <img id="cBot" src="assets/emoji/1f916.svg" style="width:240px;height:240px;display:block;margin:0 auto 10px">
+      <div class="wordmark">Tuah<span class="b">Bots</span></div>
+    </div>
+    <div class="abs" id="cTag" style="left:0;right:0;top:850px;text-align:center;font-size:62px;font-weight:800">Your AI that makes the phone calls. <img class="e" src="assets/emoji/1f4de.svg"></div>
+  </div>
+
+  <!-- D/F: product -->
+  <div class="layer" id="sD">
+    <div id="cam" class="layer">
+      <div id="browser">
+        <div class="chrome"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span>
+          <div class="url"><img class="e" src="assets/emoji/1f512.svg" style="width:16px;height:16px"> your-tuahbots-server/app</div></div>
+        <div class="app-h"><span class="title">Tuah</span><span class="who">Pat Rivera</span><span class="so">Sign out</span></div>
+        <div class="app-body">
+          <section class="chat">
+            <div id="log">
+              <div class="empty" id="empty"><p><b>Hi Pat!</b> I can phone people and businesses for you and report back here.</p><p>Calls start by saying I'm an AI assistant and that the call is recorded.</p></div>
+              <div class="msg user" id="m1">Call (555) 123-4567, that's Mike at Acme Roofing. Get the status of my quote and ask if they can start before the 20th.
+                <div class="quote"><div class="qh">ACME ROOFING</div><div style="color:#666;margin-bottom:6px">Quote #2041 · for Pat Rivera</div>
+                  <div class="row"><span>Tear-off &amp; disposal</span><span>$3,200</span></div><div class="row"><span>Architectural shingles</span><span>$8,900</span></div>
+                  <div class="row"><span>Flashing &amp; vents</span><span>$1,450</span></div><div class="row"><span>Labor</span><span>$1,250</span></div>
+                  <div class="tot"><span>TOTAL</span><span>$14,800</span></div><div class="sig">Mike R.</div></div>
+                <span class="time">9:41 AM</span></div>
+              <div class="typing" id="typing">Tuah is working on it…</div>
+              <div class="msg assistant" id="m2">On it! <img class="e" src="assets/emoji/1f4de.svg"> Calling Mike at Acme Roofing now. I'll ask about quote #2041 and whether they can start before the 20th.<span class="time">9:41 AM</span></div>
+              <div class="msg assistant" id="m3"><img class="e" src="assets/emoji/2705.svg"> <b>Done!</b> Mike says quote #2041 is approved and they can start <b>Monday the 17th</b>, before the 20th. <img class="e" src="assets/emoji/1f64c.svg"><br>Transcript and recording are under Your calls.<span class="time">9:44 AM</span></div>
+            </div>
+            <div class="chips" id="chips"><span class="chip" id="chip"><img class="e" src="assets/emoji/1f4ce.svg"> quote.jpg</span></div>
+            <div class="composer">
+              <span class="ib"><img class="e" src="assets/emoji/1f4ce.svg"></span>
+              <div class="ta" id="ta"><span class="ph">Ask Tuah to call someone…</span></div>
+              <span class="ib send" id="sendBtn">Send</span>
+            </div>
+          </section>
+          <aside>
+            <h3 id="callsH">Your calls</h3>
+            <div id="taskEmpty" class="muted">No calls yet.</div>
+            <div class="task" id="task1"><div class="top"><span>Mike at Acme Roofing</span><span class="pill prog" id="pill">in progress</span></div>
+              <div class="obj">Get the status of quote #2041 and ask if they can start before the 20th.</div><div class="muted">Today 9:41 AM</div></div>
+            <div class="task" style="opacity:.55"><div class="top"><span>Dr. Lee's office</span><span class="pill done">completed</span></div>
+              <div class="obj">Move Thursday's cleaning to next week.</div><div class="muted">Yesterday</div></div>
+            <div class="task" style="opacity:.55"><div class="top"><span>Luigi's Pizzeria</span><span class="pill done">completed</span></div>
+              <div class="obj">Book a table for 6 on Friday at 7.</div><div class="muted">Mon</div></div>
+          </aside>
+        </div>
+      </div>
+      <img id="cursor" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M3 2l7 19 2.5-7.5L20 11z' fill='white' stroke='black' stroke-width='1.5' stroke-linejoin='round'/></svg>">
+      <div id="ripple"></div>
+    </div>
+    <div class="callout" id="co1">snap the quote <img class="e" src="assets/emoji/1f4f8.svg"></div>
+    <div class="callout" id="co2">every call, tracked live ➜</div>
+    <div class="callout" id="co3">answers land right in your chat</div>
+    <div id="notif"><div class="ic"><img src="assets/emoji/1f916.svg"></div><div><b>Tuah</b><div>Done! Quote approved, they can start Monday the 17th</div></div></div>
+  </div>
+
+  <!-- E: the call -->
+  <div class="layer" id="sE">
+    <div id="phone"><div id="screen"><div class="notch"></div>
+      <div class="callee">Mike</div><div class="callee-sub">Acme Roofing · (555) 123-4567</div>
+      <div id="ctimer">00:00</div><div id="rec"><i></i>REC</div>
+      <div class="ring" id="ring1"></div><div class="ring" id="ring2"></div>
+      <div id="orb"><img src="assets/emoji/1f916.svg"></div>
+      <div id="bars"></div>
+      <div id="endBtn"><img class="e" src="assets/emoji/1f4de.svg" style="transform:rotate(135deg)"></div>
+    </div></div>
+    <div id="lines">
+      <div class="line bot" id="l0"><span class="sp">Tuah · AI assistant</span>Hi Mike, this is Tuah, an AI assistant calling for Pat. This call is recorded.</div>
+      <div class="line them" id="l1"><span class="sp">Mike</span>Oh hey! Sure, what's up?</div>
+      <div class="line bot" id="l2"><span class="sp">Tuah · AI assistant</span>Checking on quote #2041. Any chance you can start before the 20th?</div>
+      <div class="line them" id="l3"><span class="sp">Mike</span>Approved this morning! We can do Monday the 17th.</div>
+      <div class="line bot" id="l4"><span class="sp">Tuah · AI assistant</span>Perfect, I'll let Pat know. Thanks, Mike!</div>
+    </div>
+    <div class="badge" id="bd1"><img class="e" src="assets/emoji/1f916.svg"> Says it's an AI, up front</div>
+    <div class="badge" id="bd2"><img class="e" src="assets/emoji/1f399.svg"> Recorded &amp; transcribed</div>
+  </div>
+
+  <!-- G: rapid fire -->
+  <div class="layer" id="sG">
+    <div class="rf" id="g0" style="background:var(--pink)"><div><img class="em" src="assets/emoji/1f522.svg"><div class="w display">Phone trees</div></div><div class="stamp">PRESSED</div></div>
+    <div class="rf" id="g1" style="background:var(--yellow);color:var(--navy)"><div><img class="em" src="assets/emoji/1f4fc.svg"><div class="w display">Voicemail</div></div><div class="stamp" style="color:var(--navy);border-color:var(--navy)">LEFT</div></div>
+    <div class="rf" id="g2" style="background:var(--blue)"><div><img class="em" src="assets/emoji/1f501.svg"><div class="w display">Callbacks</div></div><div class="stamp">ANSWERED</div></div>
+    <div class="rf" id="g3" style="background:var(--green)"><div><img class="em" src="assets/emoji/1f3b6.svg"><div class="w display">Hold music</div></div><div class="stamp">SURVIVED</div></div>
+  </div>
+
+  <!-- H: end card -->
+  <div class="layer" id="sH">
+    <div class="abs" id="hLogo" style="left:0;right:0;top:170px;text-align:center">
+      <img id="hBot" src="assets/emoji/1f916.svg" style="width:220px;height:220px;display:block;margin:0 auto 10px">
+      <div class="wordmark" style="font-size:230px">Tuah<span class="b">Bots</span></div>
+    </div>
+    <div class="abs" id="tagline" style="left:0;right:0;top:700px;text-align:center">Let the bot make the call.</div>
+    <div class="abs fine" id="fine" style="left:0;right:0;top:830px;text-align:center">INVITE-ONLY &nbsp;·&nbsp; SAYS IT'S AN AI &nbsp;·&nbsp; RECORDED WITH NOTICE &nbsp;·&nbsp; CALLS ONLY WHO YOU ASK</div>
+    <div class="abs" id="hLaunch" style="left:0;right:0;top:920px;text-align:center"><span style="display:inline-block;background:var(--yellow);color:var(--navy);font-family:'Archivo Black';font-size:40px;padding:12px 34px 8px;border-radius:99px">NOW LAUNCHING <img class="e" src="assets/emoji/1f680.svg"></span></div>
+  </div>
+
+  <div class="layer" id="tagLayer"><div class="tag" id="tag"><span class="n" id="tagN">1</span><span id="tagT">Ask</span></div></div>
+  <div class="layer" id="vignette"></div>
+  <div class="layer" id="flash"></div>
+</div></div>
+
+<script>
+const BPM = 128, BEAT = 60 / BPM, BAR = BEAT * 4, DURATION = 31;
+const $ = (id) => document.getElementById(id);
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+const prog = (t, start, dur) => clamp((t - start) / dur);
+const E = {
+  outCubic: (k) => 1 - Math.pow(1 - k, 3),
+  inCubic: (k) => k * k * k,
+  inOutCubic: (k) => (k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2),
+  outBack: (k) => { const c1 = 1.9, c3 = c1 + 1; return 1 + c3 * Math.pow(k - 1, 3) + c1 * Math.pow(k - 1, 2); },
+  outElastic: (k) => (k === 0 || k === 1 ? k : Math.pow(2, -10 * k) * Math.sin((k * 10 - .75) * (2 * Math.PI) / 3) + 1),
+};
+// deterministic pseudo-noise
+const noise = (x) => { const s = Math.sin(x * 12.9898) * 43758.5453; return s - Math.floor(s); };
+
+function T(el, o) {
+  const s = el.style;
+  if (o.op != null) s.opacity = o.op;
+  const parts = [];
+  if (o.x != null || o.y != null) parts.push(`translate(${o.x || 0}px,${o.y || 0}px)`);
+  if (o.r != null) parts.push(`rotate(${o.r}deg)`);
+  if (o.s != null) parts.push(`scale(${o.s})`);
+  if (o.sx != null) parts.push(`scale(${o.sx},${o.sy})`);
+  s.transform = parts.join(" ");
+  if (o.vis != null) s.visibility = o.vis ? "visible" : "hidden";
+  if (o.blur != null) s.filter = o.blur > 0.05 ? `blur(${o.blur}px)` : "none";
+}
+const show = (el, on) => { el.style.display = on ? "" : "none"; };
+const between = (t, a, b) => t >= a && t < b;
+
+// slam-in: big scale -> 1 with overshoot, plus blur
+function slam(el, t, start, from = 2.6) {
+  const k = prog(t, start, .22);
+  if (t < start) return T(el, { op: 0, vis: 0 });
+  T(el, { op: clamp(k * 3), s: lerp(from, 1, E.outBack(k)), blur: (1 - k) * 18, vis: 1 });
+}
+
+// keyframed camera
+function keyed(t, keys) {
+  if (t <= keys[0][0]) return keys[0].slice(1);
+  for (let i = 0; i < keys.length - 1; i++) {
+    const [t0, ...a] = keys[i], [t1, ...b] = keys[i + 1];
+    if (t < t1) { const k = E.inOutCubic((t - t0) / (t1 - t0)); return a.map((v, j) => lerp(v, b[j], k)); }
+  }
+  return keys[keys.length - 1].slice(1);
+}
+
+const MSG = "Call (555) 123-4567, that's Mike at Acme Roofing. Get the status of my quote and ask if they can start before the 20th.";
+
+// scene timing (seconds), locked to 128 BPM bars
+const S = {
+  A: 0, A2: BAR, B: BAR * 2, C: BAR * 3, D: BAR * 4, E: BAR * 8, F: BAR * 12, G: BAR * 14, H: BAR * 15,
+};
+
+// waveform bars
+const barsEl = $("bars");
+for (let i = 0; i < 21; i++) barsEl.append(document.createElement("b"));
+
+const LINES = [
+  { id: "l0", at: S.E + .55, who: "bot", end: S.E + 2.0 },
+  { id: "l1", at: S.E + 2.15, who: "them", end: S.E + 2.9 },
+  { id: "l2", at: S.E + 3.0, who: "bot", end: S.E + 4.5 },
+  { id: "l3", at: S.E + 4.6, who: "them", end: S.E + 5.9 },
+  { id: "l4", at: S.E + 6.0, who: "bot", end: S.E + 7.2 },
+];
+
+function render(t) {
+  const beatPhase = (t / BEAT) % 1;
+  const onDrop = t >= S.C && t < S.H + BAR * 1.5;
+  const pulse = onDrop ? Math.pow(1 - beatPhase, 4) : 0;
+
+  // ---------- background ----------
+  const inDemo = t >= S.D && t < S.G;
+  $("rays").style.transform = `rotate(${t * 12}deg) scale(${1 + pulse * .04})`;
+  $("rays").style.opacity = t >= S.C && t < S.D ? 1 : t >= S.H ? 1 : inDemo ? .25 : 0;
+  T($("blob1"), { x: 300 + Math.sin(t * .7) * 250, y: 100 + Math.cos(t * .5) * 120 });
+  T($("blob2"), { x: 1100 + Math.cos(t * .6) * 260, y: 400 + Math.sin(t * .8) * 140 });
+  $("grid").style.backgroundPosition = `0 ${(t * 240) % 120}px`;
+  $("grid").style.opacity = t < S.C ? .35 : .7;
+  $("bg").style.filter = `brightness(${1 + pulse * .35}) saturate(${t < S.B ? .7 : 1.1})`;
+
+  // ---------- A: HATE MAKING PHONE CALLS? ----------
+  const a = between(t, S.A, S.A2);
+  show($("sA"), a);
+  if (a) ["w0", "w1", "w2", "w3"].forEach((id, i) => slam($(id), t, S.A + i * BEAT));
+
+  // ---------- A2: on hold ----------
+  const a2 = between(t, S.A2, S.B);
+  show($("sA2"), a2);
+  if (a2) {
+    const k = prog(t, S.A2, .25);
+    T($("holdBox"), { op: k, s: lerp(1.4, 1, E.outCubic(k)) });
+    const secs = 47 * 60 + 12 + Math.floor((t - S.A2) * 61);
+    const hh = String(Math.floor(secs / 3600)).padStart(2, "0"), mm = String(Math.floor(secs / 60) % 60).padStart(2, "0"), ss = String(secs % 60).padStart(2, "0");
+    $("holdTimer").textContent = `${hh}:${mm}:${ss}`;
+    $("holdLabel").style.opacity = (Math.floor(t * 4) % 2) ? 1 : .35;
+    slam($("sadEmoji"), t, S.A2 + BEAT * 1.5, 0.2);
+    T($("skull"), { op: prog(t, S.A2 + BEAT * 2, .2), r: Math.sin(t * 9) * 18, s: 1 });
+    const zk = prog(t, S.A2, BAR);
+    $("sA2").style.transform = `scale(${1 + zk * .08})`;
+  }
+
+  // ---------- B: WHAT IF A BOT MADE THEM FOR YOU? ----------
+  const b = between(t, S.B, S.C);
+  show($("sB"), b);
+  if (b) {
+    slam($("b0"), t, S.B, 1.8); slam($("b1"), t, S.B + BEAT, 1.8); slam($("b2"), t, S.B + BEAT * 2, 1.8);
+    const shake = prog(t, S.B + BEAT * 3, BEAT);
+    $("sB").style.transform = `translate(${(noise(t * 50) - .5) * 30 * shake}px,${(noise(t * 70) - .5) * 30 * shake}px) scale(${1 + shake * .25})`;
+  }
+
+  // ---------- C: logo drop ----------
+  const c = between(t, S.C, S.D);
+  show($("sC"), c);
+  if (c) {
+    const k = prog(t, S.C, .35);
+    T($("cLogo"), { s: lerp(3, 1, E.outBack(k)) * (1 + pulse * .05), op: clamp(k * 4), blur: (1 - k) * 20 });
+    T($("cBot"), { r: Math.sin(t * 8) * 10, y: -Math.abs(Math.sin(t * Math.PI / BEAT)) * 30 });
+    const tk = prog(t, S.C + BEAT * 1.5, .3);
+    T($("cTag"), { op: tk, y: lerp(60, 0, E.outBack(tk)) });
+    const shake = 1 - prog(t, S.C, .5);
+    $("sC").style.transform = `translate(${(noise(t * 40) - .5) * 60 * shake}px,${(noise(t * 33) - .5) * 60 * shake}px)`;
+  }
+
+  // ---------- D + F: product chat ----------
+  const d = between(t, S.D, S.E) || between(t, S.F, S.G);
+  show($("sD"), d);
+  if (d) {
+    const inF = t >= S.F;
+    // camera [t, scale, x, y]
+    const cam = inF
+      ? keyed(t, [[S.F, .78, 0, 140], [S.F + .45, .86, 0, 60], [S.F + 1.2, 1.05, 150, -60], [S.G, 1.12, 160, -80]])
+      : keyed(t, [[S.D, .55, 0, 200], [S.D + .5, .9, 0, 30], [S.D + 1.0, 1.4, 200, -420], [S.D + 3.0, 1.4, 200, -420],
+                  [S.D + 3.5, .92, 0, 10], [S.D + 4.6, .92, 0, 10], [S.D + 5.2, 1.3, -420, 110], [S.D + 6.6, 1.3, -420, 110], [S.E, 2.4, -900, 300]]);
+    T($("cam"), { s: cam[0], x: cam[1], y: cam[2] });
+    const intro = prog(t, inF ? S.F : S.D, .4);
+    $("browser").style.transform = `perspective(2400px) rotateY(${lerp(inF ? 0 : -18, 0, E.outCubic(intro))}deg) rotateX(${lerp(10, 0, E.outCubic(intro))}deg)`;
+    $("cam").style.opacity = inF ? 1 : clamp(intro * 3) * (1 - prog(t, S.E - .25, .25));
+
+    // typing
+    const typeStart = S.D + .9, typeDur = 2.0;
+    const sendAt = S.D + 3.1;
+    const m1At = sendAt + .1, m2At = S.D + 4.2, m3At = S.F + .55;
+    const n = Math.floor(prog(t, typeStart, typeDur) * MSG.length);
+    const caretOn = Math.floor(t * 3) % 2 === 0;
+    if (inF || t >= m1At) $("ta").innerHTML = `<span class="ph">Ask Tuah to call someone…</span>`;
+    else if (t < typeStart) $("ta").innerHTML = `<span class="ph">Ask Tuah to call someone…</span>`;
+    else $("ta").innerHTML = MSG.slice(0, n).replace(/&/g, "&amp;").replace(/</g, "&lt;") + (caretOn ? '<span class="caret"></span>' : "");
+    const chipK = prog(t, S.D + 2.45, .25);
+    show($("chips"), !inF && t >= S.D + 2.45 && t < m1At);
+    T($("chip"), { s: E.outBack(chipK), op: chipK });
+    $("sendBtn").style.transform = between(t, sendAt - .05, sendAt + .12) ? "scale(.88)" : "none";
+
+    // messages
+    const pop = (el, at) => {
+      el.style.display = t >= at ? "" : "none";
+      const k = prog(t, at, .35);
+      T(el, { s: lerp(.6, 1, E.outBack(k)), op: clamp(k * 2) });
+    };
+    $("empty").style.display = !inF && t < m1At ? "" : "none";
+    pop($("m1"), inF ? -1 : m1At);
+    pop($("m2"), inF ? -1 : m2At);
+    const typingOn = (!inF && between(t, m1At + .3, m2At)) || (inF && t < m3At);
+    $("typing").style.display = typingOn ? "" : "none";
+    $("typing").style.opacity = .5 + .5 * Math.sin(t * 10);
+    pop($("m3"), inF ? m3At : 1e9);
+
+    // calls sidebar
+    const taskAt = S.D + 4.4;
+    const tk = prog(t, taskAt, .4);
+    $("task1").style.display = inF || t >= taskAt ? "" : "none";
+    T($("task1"), { op: inF ? 1 : tk, x: inF ? 0 : lerp(80, 0, E.outBack(tk)) });
+    $("taskEmpty").style.display = "none";
+    $("callsH").textContent = "Your calls (3)";
+    const done = inF && t >= m3At + .1;
+    $("pill").className = "pill " + (done ? "done" : "prog");
+    $("pill").textContent = done ? "completed" : "in progress";
+    const pk = prog(t, m3At + .1, .3);
+    $("pill").style.transform = done ? `scale(${lerp(1.8, 1, E.outBack(pk))})` : `scale(${1 + .08 * Math.sin(t * 8)})`;
+    $("task1").style.background = (!inF && t > S.D + 5.2) || done ? "rgba(255,214,10,.18)" : "transparent";
+
+    // cursor + ripple
+    const curK = keyed(t, [[S.D + 2.1, 1500, 1000], [S.D + 2.4, 330, 1010], [S.D + 2.6, 330, 1010], [S.D + 3.0, 1290, 1012], [S.D + 3.5, 1350, 1100]]);
+    show($("cursor"), !inF && between(t, S.D + 2.1, S.D + 3.5));
+    T($("cursor"), { x: curK[0] + 210, y: curK[1] - 300 });
+    const clickAt = between(t, S.D + 2.4, S.D + 2.9) ? S.D + 2.45 : sendAt;
+    const rk = prog(t, clickAt, .4);
+    show($("ripple"), !inF && rk > 0 && rk < 1 && between(t, S.D + 2.4, S.D + 3.6));
+    T($("ripple"), { x: curK[0] + 220, y: curK[1] - 290, s: lerp(.2, 1.4, E.outCubic(rk)), op: 1 - rk });
+
+    // callouts
+    const co = (el, a0, a1, x, y, r) => {
+      const k = prog(t, a0, .3), o = 1 - prog(t, a1, .2);
+      show(el, between(t, a0, a1 + .2));
+      T(el, { x, y, r, s: lerp(.3, 1, E.outBack(k)), op: Math.min(k * 2, o) });
+    };
+    co($("co1"), S.D + 2.5, S.D + 3.1, 120, 120, -6);
+    co($("co2"), S.D + 5.25, S.D + 7.0, 260, 640, -4);
+    co($("co3"), S.F + .7, S.G - .3, 230, 960, -3);
+
+    // notification
+    const nk = prog(t, S.F + .25, .4), nOut = prog(t, S.F + 2.6, .3);
+    show($("notif"), inF && between(t, S.F + .25, S.F + 3));
+    T($("notif"), { y: lerp(-220, 0, E.outBack(nk)) - nOut * 260 });
+  }
+
+  // ---------- E: the call ----------
+  const e = between(t, S.E, S.F);
+  show($("sE"), e);
+  if (e) {
+    const k = prog(t, S.E, .45);
+    T($("phone"), { y: lerp(900, 0, E.outBack(k)), r: lerp(-20, -3, E.outCubic(k)) + Math.sin(t * 2) * 1.2 });
+    const sec = Math.max(0, Math.floor((t - S.E - .3) * 1.6));
+    $("ctimer").textContent = "00:" + String(sec).padStart(2, "0");
+    $("rec").style.opacity = (Math.floor(t * 2) % 2) ? 1 : .55;
+    const speaking = LINES.find((l) => between(t, l.at, l.end));
+    const amp = speaking ? 1 : 0.12;
+    [...barsEl.children].forEach((bEl, i) => {
+      const h = 10 + amp * 90 * Math.abs(Math.sin(t * 11 + i * .9) * noise(i + Math.floor(t * 14)));
+      bEl.style.height = h + "px";
+      bEl.style.background = speaking && speaking.who === "them" ? "#ff3d7f" : "#ffd60a";
+    });
+    const botTalk = speaking && speaking.who === "bot";
+    $("orb").style.transform = `scale(${1 + (botTalk ? .08 * Math.abs(Math.sin(t * 13)) : 0) + pulse * .05})`;
+    [["ring1", 0], ["ring2", .5]].forEach(([id, off]) => {
+      const rp = ((t * .9 + off) % 1);
+      const sz = 250 + rp * 220;
+      Object.assign($(id).style, { width: sz + "px", height: sz + "px", marginLeft: -sz / 2 + "px", marginTop: -sz / 2 + "px", opacity: (1 - rp) * (botTalk ? 1 : .35) });
+    });
+    // transcript stack: newest at the bottom, older ones slide up
+    const shown = LINES.filter((l) => t >= l.at);
+    let y = 0;
+    const heights = { l0: 170, l1: 115, l2: 170, l3: 170, l4: 115 };
+    const gap = 22;
+    const total = shown.reduce((s, l) => s + heights[l.id] + gap, 0);
+    const offset = Math.max(0, total - 640);
+    LINES.forEach((l) => {
+      const el = $(l.id);
+      const vis = t >= l.at;
+      show(el, vis);
+      if (!vis) return;
+      const lk = prog(t, l.at, .35);
+      const idx = shown.indexOf(l);
+      const age = shown.length - 1 - idx;
+      T(el, { x: l.who === "them" ? 120 : 0, y: y - offset + lerp(60, 0, E.outCubic(lk)), s: lerp(.5, 1, E.outBack(lk)), op: clamp(lk * 2) * (age > 3 ? 0 : age > 2 ? .35 : age > 1 ? .7 : 1) });
+      el.style.transformOrigin = "0 100%";
+      y += heights[l.id] + gap;
+    });
+    const b1 = prog(t, S.E + .9, .3), b2 = prog(t, S.E + 3.6, .3);
+    T($("bd1"), { x: 880, y: 940, s: E.outBack(b1), op: b1 });
+    T($("bd2"), { x: 1360, y: 940, s: E.outBack(b2), op: b2 });
+    $("bd1").style.left = $("bd2").style.left = "0px"; $("bd1").style.top = $("bd2").style.top = "0px";
+    const wipe = prog(t, S.F - .3, .3);
+    $("sE").style.opacity = 1 - wipe;
+    $("sE").style.transform = `scale(${1 + wipe * .3})`;
+  }
+
+  // ---------- G: rapid fire ----------
+  const g = between(t, S.G, S.H);
+  show($("sG"), g);
+  if (g) {
+    const i = Math.min(3, Math.floor((t - S.G) / BEAT));
+    ["g0", "g1", "g2", "g3"].forEach((id, j) => {
+      const el = $(id); show(el, j === i);
+      if (j !== i) return;
+      const st = S.G + j * BEAT;
+      const k = prog(t, st, .15);
+      el.firstElementChild.style.transform = `scale(${lerp(1.6, 1, E.outBack(k))}) rotate(${(j % 2 ? 1 : -1) * 3}deg)`;
+      el.firstElementChild.style.marginTop = "-120px";
+      const sk = prog(t, st + BEAT * .45, .12);
+      const stamp = el.querySelector(".stamp");
+      stamp.style.opacity = sk > 0 ? 1 : 0;
+      stamp.style.transform = `translate(-50%,0) rotate(${-8 + j * 5}deg) scale(${lerp(3, 1, E.outCubic(sk))})`;
+    });
+  }
+
+  // ---------- H: end card ----------
+  const h = t >= S.H;
+  show($("sH"), h);
+  if (h) {
+    const k = prog(t, S.H, .4);
+    T($("hLogo"), { s: lerp(2.6, 1, E.outBack(k)) * (1 + pulse * .04), op: clamp(k * 4), blur: (1 - k) * 16 });
+    T($("hBot"), { r: Math.sin(t * 6) * 8, y: -Math.abs(Math.sin(t * Math.PI / BEAT)) * 24 * (t < S.H + BAR * 1.5 ? 1 : .3) });
+    const tk = prog(t, S.H + BEAT * 1.5, .35);
+    T($("tagline"), { op: tk, y: lerp(50, 0, E.outBack(tk)) });
+    const fk = prog(t, S.H + BEAT * 3, .4);
+    T($("fine"), { op: fk, y: lerp(30, 0, E.outCubic(fk)) });
+    const lk = prog(t, S.H + BEAT * 4.5, .35);
+    T($("hLaunch"), { op: lk, s: lerp(.4, 1, E.outBack(lk)) });
+    const out = prog(t, DURATION - .6, .6);
+    $("stage").style.filter = `brightness(${1 - out})`;
+  } else $("stage").style.filter = "none";
+
+  // ---------- step tags ----------
+  const tags = [[S.D + .3, S.E - .3, "1", "Ask"], [S.E + .3, S.F - .35, "2", "Tuah calls"], [S.F + .3, S.G, "3", "You get the answer"]];
+  const cur = tags.find(([a0, a1]) => between(t, a0, a1));
+  show($("tag"), !!cur);
+  if (cur) {
+    $("tagN").textContent = cur[2]; $("tagT").textContent = cur[3];
+    const k = prog(t, cur[0], .3), o = prog(t, cur[1] - .2, .2);
+    T($("tag"), { s: lerp(.2, 1, E.outBack(k)) * (1 - o), r: -3, op: 1 - o });
+  }
+
+  // ---------- flashes on big hits ----------
+  const hits = [S.C, S.D, S.E, S.F, S.G, S.G + BEAT, S.G + BEAT * 2, S.G + BEAT * 3, S.H];
+  let fl = 0;
+  for (const hT of hits) if (t >= hT && t < hT + .25) fl = Math.max(fl, (1 - (t - hT) / .25) * (hT === S.C || hT === S.H ? .95 : .45));
+  if (t < S.B) for (let i = 0; i < 4; i++) { const hT = i * BEAT; if (t >= hT && t < hT + .12) fl = Math.max(fl, .25 * (1 - (t - hT) / .12)); }
+  $("flash").style.opacity = fl;
+}
+
+// preview mode: scale to window and play in real time (with soundtrack if present)
+window.render = render;
+window.DURATION = DURATION;
+function fit() { const s = Math.min(innerWidth / 1920, innerHeight / 1080); $("stage").style.transform = `scale(${s})`; }
+if (!location.search.includes("render")) {
+  fit(); addEventListener("resize", fit);
+  const audio = new Audio("tuahbots-soundtrack.wav");
+  let t0 = null;
+  const loop = (now) => { if (t0 == null) t0 = now; const t = ((now - t0) / 1000) % DURATION; render(t); requestAnimationFrame(loop); };
+  document.body.addEventListener("click", () => { audio.currentTime = 0; audio.play().catch(() => {}); t0 = null; });
+  requestAnimationFrame(loop);
+} else {
+  render(0);
+}
+</script>
+</body>
+</html>
