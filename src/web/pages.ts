@@ -14,7 +14,7 @@ a{color:var(--accent)}button{font:inherit;cursor:pointer}
 header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--card);border-bottom:1px solid var(--line)}
 header .title{font-weight:600}header .who{color:var(--muted);font-size:14px;margin-left:auto}
 header form{margin:0}header button{background:none;border:1px solid var(--line);color:var(--muted);border-radius:8px;padding:4px 10px;font-size:14px}
-.pill{display:inline-block;font-size:12px;padding:1px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.pill{display:inline-block;flex:none;align-self:flex-start;font-size:12px;line-height:18px;font-weight:500;padding:0 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
 .pill.completed{color:var(--ok);border-color:currentColor}.pill.failed{color:var(--bad);border-color:currentColor}.pill.in_progress,.pill.pending{color:var(--warn);border-color:currentColor}
 `;
 
@@ -54,7 +54,7 @@ form.composer textarea{flex:1;resize:none;max-height:160px;padding:10px 12px;bor
 aside{width:300px;border-left:1px solid var(--line);overflow-y:auto;padding:16px;background:var(--card)}
 aside h3{margin:0 0 10px;font-size:15px}
 .task{display:block;text-decoration:none;color:inherit;padding:10px 0;border-bottom:1px solid var(--line)}
-.task .top{display:flex;justify-content:space-between;gap:8px;font-weight:500}
+.task .top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;font-weight:500}.task .top>span:first-child{min-width:0;overflow-wrap:anywhere}
 .task .obj{color:var(--muted);font-size:13px;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .muted{color:var(--muted);font-size:14px}
 @media (max-width:760px){.layout{flex-direction:column}aside{width:auto;border-left:0;border-top:1px solid var(--line);max-height:30vh;order:-1}aside.collapsed .list{display:none}aside h3{cursor:pointer;margin:0}aside h3::after{content:" ▾";color:var(--muted)}aside:not(.collapsed) h3{margin-bottom:6px}aside:not(.collapsed) h3::after{content:" ▴"}}

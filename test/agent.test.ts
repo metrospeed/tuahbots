@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, test } from "node:test";
-import { functionCall, sendResponseStream, textMessage } from "./fake-openai.js";
+import { functionCall, rejectUnknown, sendResponseStream, textMessage, unknownInputField } from "./fake-openai.js";
 
 // A fake Responses API: first turn calls a tool, second turn answers in text.
 const requests: any[] = [];
@@ -13,6 +13,8 @@ const fake = http.createServer((req, res) => {
   req.on("end", () => {
     const request = JSON.parse(body);
     requests.push(request);
+    const unknown = unknownInputField(request);
+    if (unknown) return rejectUnknown(res, unknown);
     sendResponseStream(
       res,
       request.model,

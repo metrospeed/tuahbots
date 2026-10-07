@@ -7,7 +7,15 @@ import crypto from "node:crypto";
  */
 export type RelaySession =
   | { mode: "user"; conversationId: number; userId: number; greeting: string }
-  | { mode: "task"; conversationId: number; taskId: number; userId: number; greeting: string };
+  | {
+      mode: "task";
+      conversationId: number;
+      taskId: number;
+      userId: number;
+      greeting: string;
+      /** Calls the agent placed: after the greeting, the agent keeps talking instead of waiting for a reply. */
+      speakFirst?: boolean;
+    };
 
 const TTL_MS = 10 * 60 * 1000;
 const sessions = new Map<string, { session: RelaySession; expires: number }>();

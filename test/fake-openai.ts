@@ -40,3 +40,23 @@ export const textMessage = (text: string) => ({
   status: "completed",
   content: [{ type: "output_text", text, annotations: [] }],
 });
+
+/**
+ * The real API rejects unknown fields, including the parse helpers' extras
+ * (`parsed_arguments`, `parsed`) if they're echoed back. Returns the problem, if any.
+ */
+export function unknownInputField(request: any): string | null {
+  const items = Array.isArray(request.input) ? request.input : [];
+  for (const [i, item] of items.entries()) {
+    if (item && "parsed_arguments" in item) return `input[${i}].parsed_arguments`;
+    for (const [j, part] of (Array.isArray(item?.content) ? item.content : []).entries()) {
+      if (part && "parsed" in part) return `input[${i}].content[${j}].parsed`;
+    }
+  }
+  return null;
+}
+
+export function rejectUnknown(res: http.ServerResponse, field: string): void {
+  res.writeHead(400, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: { message: `Unknown parameter: '${field}'.`, type: "invalid_request_error", param: field } }));
+}

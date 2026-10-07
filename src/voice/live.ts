@@ -9,6 +9,7 @@ import { runAgent, type AgentTool, type ContentPart } from "../agent/llm.js";
 import { recentChatContext, taskBrief, userDetails } from "../agent/context.js";
 import {
   LIVE_BACKEND_ADDENDUM,
+  LIVE_SPEAK_FIRST,
   liveTaskInstructions,
   liveUserInstructions,
   taskCallPrompt,
@@ -117,6 +118,8 @@ class LiveCall {
   private callSid = "";
   private live?: LiveWS;
   private liveReady = false;
+  /** Prompt that makes GPT-Live speak first once the greeting ends; empty when not needed or sent. */
+  private kickoff = "";
   private pendingAudio: string[] = [];
   private grouper = new TranscriptGrouper();
   private transcriptDone = false;
@@ -221,6 +224,18 @@ class LiveCall {
       }, 5000),
     );
     await this.ready;
+    this.maybeKickoff();
+  }
+
+  /**
+   * On calls the agent placed, GPT-Live starts talking the moment the greeting
+   * ends (when the audio stream attaches) instead of waiting for "hello?".
+   */
+  private maybeKickoff(): void {
+    if (!this.kickoff || !this.liveReady || !this.twilio) return;
+    const content = this.kickoff;
+    this.kickoff = "";
+    this.live!.send({ type: "session.commentary.append", content, delegation_id: null });
   }
 
   private async onTwilio(raw: string): Promise<void> {
@@ -263,6 +278,10 @@ class LiveCall {
     } else {
       const task = (await getTask(s.taskId))!;
       instructions = liveTaskInstructions(taskBrief(task, this.user!));
+      if (s.speakFirst) {
+        instructions += `\n\n${LIVE_SPEAK_FIRST}`;
+        this.kickoff = `The greeting has just finished playing. Without waiting for a reply, continue now: briefly say why you're calling (${task.objective}) and ask your first question.`;
+      }
     }
     return {
       model: config.openai.liveModel,
@@ -272,7 +291,14 @@ class LiveCall {
       input: [
         {
           role: "developer",
-          content: [{ type: "input_text", text: "The call has connected. This greeting, including the recording disclosure, was already played:" }],
+          content: [
+            {
+              type: "input_text",
+              text: s.mode === "task" && s.speakFirst
+                ? "The call was answered and this greeting, including the recording disclosure, was just played. Continue speaking immediately after it."
+                : "The call has connected. This greeting, including the recording disclosure, was already played:",
+            },
+          ],
         },
         { role: "assistant", content: [{ type: "output_text", text: s.greeting }] },
       ],
@@ -298,6 +324,7 @@ class LiveCall {
       case "session.started":
         this.liveReady = true;
         for (const audio of this.pendingAudio.splice(0)) this.live!.send({ type: "session.input_audio.append", audio });
+        this.maybeKickoff();
         break;
       case "session.output_audio.delta":
         // Before the stream attaches, the greeting is still playing; drop anything early.
