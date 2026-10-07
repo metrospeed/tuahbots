@@ -5,20 +5,96 @@ import { formatPhone } from "../phone.js";
 import { getSettings } from "../settings.js";
 import { recentTasks, userChatConversation } from "../tasks.js";
 import { fetchRecording } from "../twilio.js";
-import { clearUserCookie, requireUser, setUserCookie, userForInviteToken } from "./auth.js";
+import {
+  changePassword,
+  checkLogin,
+  clearUserCookie,
+  completeInvite,
+  currentUser,
+  emailTaken,
+  fromOurSite,
+  requireUser,
+  setUserCookie,
+  Throttle,
+  userForInviteToken,
+} from "./auth.js";
+import { normalizeEmail, passwordProblem } from "./passwords.js";
 import { ALLOWED_UPLOAD_TYPES, isBusy, MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE, postUserMessage, type Upload } from "./chat.js";
-import { callPage, chatPage, simplePage } from "./pages.js";
+import { accountPage, callPage, chatPage, invitePage, loginPage, simplePage } from "./pages.js";
 
 export const webRouter = express.Router();
 
+const INVALID_LINK = simplePage(
+  "Link not valid",
+  "This link has already been used or was replaced. If you already created a login, sign in at /login; otherwise ask for a new link.",
+);
+
+/** Only redirect back into the app after sign-in, never off-site. */
+function safeNext(raw: unknown): string {
+  const next = String(raw ?? "");
+  return /^\/app(\/|\?|$)/.test(next) && !next.startsWith("//") ? next : "/app";
+}
+
+// Failed sign-in attempts: per IP and per email, 10 per 15 minutes.
+const loginThrottle = new Throttle(10, 15 * 60 * 1000);
+
+// ---- Invite and reset links ------------------------------------------------
+
 webRouter.get("/join/:token", async (req, res) => {
   const user = await userForInviteToken(req.params.token);
-  if (!user) {
-    res.status(404).send(simplePage("Link not valid", "This invite link is invalid or has been replaced. Ask for a new one."));
-    return;
-  }
-  setUserCookie(res, user);
+  if (!user) return void res.status(404).send(INVALID_LINK);
+  // Links carry the secret in the URL; keep it out of other sites' referrers and caches.
+  // ("no-referrer" would make browsers send Origin: null on the form post.)
+  res.setHeader("Referrer-Policy", "same-origin");
+  res.setHeader("Cache-Control", "no-store");
+  res.send(invitePage(user, req.params.token));
+});
+
+webRouter.post("/join/:token", async (req, res) => {
+  if (!fromOurSite(req)) return void res.sendStatus(403);
+  const token = req.params.token;
+  const user = await userForInviteToken(token);
+  if (!user) return void res.status(404).send(INVALID_LINK);
+  res.setHeader("Referrer-Policy", "same-origin");
+  res.setHeader("Cache-Control", "no-store");
+  const rawEmail = String(req.body.email ?? "");
+  const email = normalizeEmail(rawEmail);
+  const problem = !email
+    ? "Enter a valid email address."
+    : (await emailTaken(email, user.id))
+      ? "That email is already used by another account."
+      : passwordProblem(String(req.body.password ?? ""), String(req.body.confirm ?? ""));
+  if (problem) return void res.status(400).send(invitePage(user, token, { error: problem, email: rawEmail }));
+  const updated = await completeInvite(user.id, email!, String(req.body.password));
+  setUserCookie(res, updated);
   res.redirect("/app");
+});
+
+// ---- Sign in ---------------------------------------------------------------
+
+webRouter.get("/login", async (req, res) => {
+  if (await currentUser(req)) return void res.redirect(safeNext(req.query.next));
+  res.send(loginPage({ next: safeNext(req.query.next), notice: req.query.out !== undefined ? "You're signed out." : undefined }));
+});
+
+webRouter.post("/login", async (req, res) => {
+  if (!fromOurSite(req)) return void res.sendStatus(403);
+  const ip = req.ip ?? "unknown";
+  const rawEmail = String(req.body.email ?? "");
+  const email = normalizeEmail(rawEmail) ?? rawEmail.trim().toLowerCase();
+  const next = safeNext(req.body.next);
+  if (loginThrottle.blocked(`ip:${ip}`) || loginThrottle.blocked(`email:${email}`)) {
+    return void res.status(429).send(loginPage({ email: rawEmail, next, error: "Too many attempts. Try again in 15 minutes." }));
+  }
+  const user = await checkLogin(email, String(req.body.password ?? ""));
+  if (!user) {
+    loginThrottle.fail(`ip:${ip}`);
+    loginThrottle.fail(`email:${email}`);
+    return void res.status(401).send(loginPage({ email: rawEmail, next, error: "That email and password don't match." }));
+  }
+  loginThrottle.reset(`email:${email}`);
+  setUserCookie(res, user);
+  res.redirect(next);
 });
 
 webRouter.use("/app", requireUser);
@@ -28,7 +104,38 @@ webRouter.get("/app", (req, res) => res.send(chatPage(req.user!)));
 
 webRouter.post("/app/logout", (_req, res) => {
   clearUserCookie(res);
-  res.redirect("/app");
+  res.redirect("/login?out");
+});
+
+// ---- Account ----------------------------------------------------------------
+
+webRouter.get("/app/account", (req, res) => res.send(accountPage(req.user!)));
+
+webRouter.post("/app/account", async (req, res) => {
+  const user = req.user!;
+  const password = String(req.body.password ?? "");
+  const confirm = String(req.body.confirm ?? "");
+  let email = user.email;
+  if (user.password_hash) {
+    const throttleKey = `account:${user.id}`;
+    if (loginThrottle.blocked(throttleKey)) {
+      return void res.status(429).send(accountPage(user, { error: "Too many attempts. Try again in 15 minutes." }));
+    }
+    if (!(await checkLogin(user.email ?? "", String(req.body.current ?? "")))) {
+      loginThrottle.fail(throttleKey);
+      return void res.status(400).send(accountPage(user, { error: "Your current password isn't right." }));
+    }
+  } else {
+    email = normalizeEmail(String(req.body.email ?? ""));
+    if (!email) return void res.status(400).send(accountPage(user, { error: "Enter a valid email address." }));
+    if (await emailTaken(email, user.id)) return void res.status(400).send(accountPage(user, { error: "That email is already used by another account." }));
+  }
+  const problem = passwordProblem(password, confirm);
+  if (problem) return void res.status(400).send(accountPage(user, { error: problem }));
+  const updated = user.password_hash ? await changePassword(user.id, password) : await completeInvite(user.id, email!, password);
+  // This device stays signed in; other devices are signed out.
+  setUserCookie(res, updated);
+  res.send(accountPage(updated, { notice: user.password_hash ? "Password changed." : "Login created. You can now sign in from any device." }));
 });
 
 /** Chat messages after `after`, the user's recent calls, and whether a reply is pending. */

@@ -30,6 +30,8 @@ export interface User {
   active: boolean;
   login_token_hash: string | null;
   session_version: number;
+  email: string | null;
+  password_hash: string | null;
   created_at: Date;
 }
 

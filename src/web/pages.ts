@@ -51,6 +51,8 @@ form.composer textarea{flex:1;resize:none;max-height:160px;padding:10px 12px;bor
 .chips span{font-size:13px;background:var(--bg);border:1px solid var(--line);border-radius:99px;padding:2px 10px;margin-top:8px}
 .error{color:var(--bad);font-size:14px;padding:0 16px}
 .notice{background:var(--bad);color:#fff;font-size:14px;padding:6px 16px;text-align:center}
+.setup{background:var(--card);border-bottom:1px solid var(--line);font-size:14px;padding:6px 16px;text-align:center}
+header a.who{text-decoration:none}header a.who:hover{text-decoration:underline}
 aside{width:300px;border-left:1px solid var(--line);overflow-y:auto;padding:16px;background:var(--card)}
 aside h3{margin:0 0 10px;font-size:15px}
 .task{display:block;text-decoration:none;color:inherit;padding:10px 0;border-bottom:1px solid var(--line)}
@@ -60,8 +62,9 @@ aside h3{margin:0 0 10px;font-size:15px}
 @media (max-width:760px){.layout{flex-direction:column}aside{width:auto;border-left:0;border-top:1px solid var(--line);max-height:30vh;order:-1}aside.collapsed .list{display:none}aside h3{cursor:pointer;margin:0}aside h3::after{content:" ▾";color:var(--muted)}aside:not(.collapsed) h3{margin-bottom:6px}aside:not(.collapsed) h3::after{content:" ▴"}}
 </style></head>
 <body>
-<header><span class="title">${esc(name)}</span><span class="who">${esc(user.name)}</span>
+<header><span class="title">${esc(name)}</span><a class="who" href="/app/account" title="Account">${esc(user.name)}</a>
 <form method="post" action="/app/logout"><button>Sign out</button></form></header>
+${user.password_hash ? "" : `<div class="setup">You're signed in on this device only. <a href="/app/account">Create a login</a> to sign in anywhere.</div>`}
 <div class="notice" id="callsOff" hidden>Calling is turned off right now. You can still chat, but ${esc(name)} can't place calls.</div>
 <div class="layout">
   <section class="chat">
@@ -253,4 +256,89 @@ main{max-width:760px;margin:0 auto;padding:16px}
   </section>
   ${sections || `<p class="muted">The call hasn't started yet.</p>`}
 </main></body></html>`;
+}
+
+// ---- Login, invite setup, account ------------------------------------------
+
+const FORM_CSS = `
+main{display:grid;place-items:center;min-height:100vh;padding:16px}
+.panel{width:100%;max-width:380px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px}
+.panel h1{font-size:22px;margin:0 0 4px}.panel .sub{color:var(--muted);font-size:14px;margin:0 0 18px}
+label{display:block;font-size:14px;color:var(--muted);margin:12px 0 4px}
+input{width:100%;font:inherit;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+input:focus{outline:2px solid var(--accent);outline-offset:1px}
+button.go{width:100%;margin-top:18px;padding:11px;border:0;border-radius:10px;background:var(--accent);color:var(--accent-ink);font-weight:600}
+.err{color:var(--bad);font-size:14px;margin:10px 0 0}.ok{color:var(--ok);font-size:14px;margin:10px 0 0}
+.foot{color:var(--muted);font-size:13px;margin-top:16px;text-align:center}`;
+
+function formPage(title: string, body: string): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(title)} · ${esc(name)}</title><style>${BASE_CSS}${FORM_CSS}</style></head>
+<body><main><div class="panel">${body}</div></main></body></html>`;
+}
+
+const passwordFields = (label: string) => `
+  <label for="password">${esc(label)}</label>
+  <input id="password" name="password" type="password" autocomplete="new-password" minlength="10" maxlength="200" required>
+  <label for="confirm">Confirm password</label>
+  <input id="confirm" name="confirm" type="password" autocomplete="new-password" minlength="10" maxlength="200" required>
+  <div class="foot" style="text-align:left;margin-top:6px">At least 10 characters.</div>`;
+
+export function loginPage(opts: { error?: string; email?: string; next?: string; notice?: string } = {}): string {
+  return formPage(
+    "Sign in",
+    `<h1>${esc(name)}</h1><p class="sub">Sign in to your account.</p>
+    <form method="post" action="/login">
+      <input type="hidden" name="next" value="${esc(opts.next ?? "/app")}">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" autocomplete="username" value="${esc(opts.email ?? "")}" required ${opts.email ? "" : "autofocus"}>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required ${opts.email ? "autofocus" : ""}>
+      ${opts.error ? `<p class="err" role="alert">${esc(opts.error)}</p>` : ""}${opts.notice ? `<p class="ok">${esc(opts.notice)}</p>` : ""}
+      <button class="go">Sign in</button>
+    </form>
+    <p class="foot">${esc(name)} is invite-only. Forgot your password? Ask the person who invited you for a reset link.</p>`,
+  );
+}
+
+/** Shown when someone opens an invite link (first login) or a reset link (has a login already). */
+export function invitePage(user: User, token: string, opts: { error?: string; email?: string } = {}): string {
+  const reset = !!user.password_hash;
+  return formPage(
+    reset ? "Reset password" : "Create your login",
+    `<h1>${reset ? "Set a new password" : `Welcome, ${esc(user.name.split(" ")[0])}`}</h1>
+    <p class="sub">${reset ? "Choose a new password. You'll be signed out on your other devices." : `You've been invited to ${esc(name)}. Create a login to get started.`}</p>
+    <form method="post" action="/join/${esc(token)}">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" autocomplete="username" value="${esc(opts.email ?? user.email ?? "")}" required>
+      ${passwordFields(reset ? "New password" : "Password")}
+      ${opts.error ? `<p class="err" role="alert">${esc(opts.error)}</p>` : ""}
+      <button class="go">${reset ? "Save and sign in" : "Create login"}</button>
+    </form>
+    <p class="foot">This link works once. Afterwards, sign in at /login.</p>`,
+  );
+}
+
+export function accountPage(user: User, opts: { error?: string; notice?: string } = {}): string {
+  const hasLogin = !!user.password_hash;
+  return formPage(
+    "Account",
+    `<p style="margin:0 0 12px"><a href="/app">← Back to chat</a></p>
+    <h1>${esc(user.name)}</h1>
+    <p class="sub">${hasLogin ? `Signed in as ${esc(user.email ?? "")}.` : "Create a login so you can sign in from any device."}</p>
+    <form method="post" action="/app/account">
+      ${
+        hasLogin
+          ? `<input type="hidden" name="email" value="${esc(user.email ?? "")}">
+      <label for="current">Current password</label>
+      <input id="current" name="current" type="password" autocomplete="current-password" required>`
+          : `<label for="email">Email</label>
+      <input id="email" name="email" type="email" autocomplete="username" required>`
+      }
+      ${passwordFields(hasLogin ? "New password" : "Password")}
+      ${opts.error ? `<p class="err" role="alert">${esc(opts.error)}</p>` : ""}${opts.notice ? `<p class="ok">${esc(opts.notice)}</p>` : ""}
+      <button class="go">${hasLogin ? "Change password" : "Create login"}</button>
+    </form>
+    ${hasLogin ? `<p class="foot">Changing your password signs you out on your other devices.</p>` : ""}`,
+  );
 }

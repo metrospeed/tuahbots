@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 import { config } from "../config.js";
 import { getUser, query, queryOne, type User } from "../db/index.js";
+import { dummyPasswordHash, hashPassword, verifyPassword } from "./passwords.js";
 
 const COOKIE = "tuah_user";
 const SESSION_DAYS = 180;
@@ -22,6 +23,67 @@ export async function issueInviteLink(userId: number): Promise<string> {
 
 export async function userForInviteToken(token: string): Promise<User | undefined> {
   return queryOne<User>("SELECT * FROM users WHERE login_token_hash = $1 AND active", [hashToken(token)]);
+}
+
+/**
+ * Finish an invite (or reset) link: save the user's login, use up the link,
+ * and sign out any other device.
+ */
+export async function completeInvite(userId: number, email: string, password: string): Promise<User> {
+  const user = await queryOne<User>(
+    `UPDATE users SET email = $2, password_hash = $3, login_token_hash = NULL, session_version = session_version + 1
+     WHERE id = $1 RETURNING *`,
+    [userId, email, await hashPassword(password)],
+  );
+  return user!;
+}
+
+/** The user for an email and password, or undefined. Takes the same time whether or not the email exists. */
+export async function checkLogin(email: string, password: string): Promise<User | undefined> {
+  const user = await queryOne<User>("SELECT * FROM users WHERE email = $1", [email]);
+  const ok = await verifyPassword(password, user?.password_hash ?? (await dummyPasswordHash()));
+  return ok && user?.active && user.password_hash ? user : undefined;
+}
+
+export async function emailTaken(email: string, exceptUserId: number): Promise<boolean> {
+  return !!(await queryOne("SELECT 1 FROM users WHERE email = $1 AND id <> $2", [email, exceptUserId]));
+}
+
+/** Change a signed-in user's password and sign out their other devices. */
+export async function changePassword(userId: number, password: string): Promise<User> {
+  const user = await queryOne<User>(
+    "UPDATE users SET password_hash = $2, session_version = session_version + 1 WHERE id = $1 RETURNING *",
+    [userId, await hashPassword(password)],
+  );
+  return user!;
+}
+
+/**
+ * Limits repeated failures per key (IP, email): after `max` failures within
+ * the window, further attempts are refused until it passes.
+ */
+export class Throttle {
+  private failures = new Map<string, { count: number; until: number }>();
+  constructor(private max: number, private windowMs: number) {}
+  blocked(key: string): boolean {
+    const entry = this.failures.get(key);
+    return !!entry && entry.count >= this.max && entry.until > Date.now();
+  }
+  fail(key: string): void {
+    const entry = this.failures.get(key);
+    const fresh = !entry || entry.until < Date.now();
+    this.failures.set(key, { count: fresh ? 1 : entry!.count + 1, until: Date.now() + this.windowMs });
+    if (this.failures.size > 10_000) this.failures.clear();
+  }
+  reset(key: string): void {
+    this.failures.delete(key);
+  }
+}
+
+/** Reject form posts from other sites (login CSRF). */
+export function fromOurSite(req: Request): boolean {
+  const origin = req.header("origin");
+  return !origin || origin === new URL(config.publicBaseUrl).origin;
 }
 
 function sign(value: string): string {
@@ -52,7 +114,7 @@ function readCookie(req: Request): string | undefined {
   return undefined;
 }
 
-async function currentUser(req: Request): Promise<User | undefined> {
+export async function currentUser(req: Request): Promise<User | undefined> {
   const [id, version, expires, signature] = (readCookie(req) ?? "").split(".");
   if (!signature || Number(expires) < Date.now()) return undefined;
   const expected = Buffer.from(sign(`${id}.${version}.${expires}`));
@@ -72,8 +134,9 @@ declare module "express-serve-static-core" {
 export async function requireUser(req: Request, res: Response, next: NextFunction): Promise<void> {
   const user = await currentUser(req);
   if (!user) {
-    if (req.path.startsWith("/app/api/")) res.status(401).json({ error: "signed_out" });
-    else res.status(401).send(signedOutPage());
+    if (req.originalUrl.startsWith("/app/api/")) res.status(401).json({ error: "signed_out" });
+    else if (req.method === "GET") res.redirect(`/login?next=${encodeURIComponent(req.originalUrl)}`);
+    else res.redirect("/login");
     return;
   }
   // Writes must come from our own pages (JSON bodies also force a CORS preflight).
@@ -86,11 +149,4 @@ export async function requireUser(req: Request, res: Response, next: NextFunctio
   }
   req.user = user;
   next();
-}
-
-export function signedOutPage(): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Signed out</title><style>body{font:16px system-ui;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px;text-align:center;background:#f6f7f9;color:#1d2330}
-@media (prefers-color-scheme:dark){body{background:#0f1218;color:#e6e8ec}}</style></head>
-<body><div><h2>You're not signed in</h2><p>Open the invite link you were sent to use ${config.agent.name}.<br>If it no longer works, ask for a new one.</p></div></body></html>`;
 }
