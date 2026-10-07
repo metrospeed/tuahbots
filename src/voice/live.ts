@@ -21,6 +21,7 @@ import { twilioClient } from "../twilio.js";
 import { dtmfAudio } from "./dtmf.js";
 import { takeRelaySession, type RelaySession } from "./sessions.js";
 import { finalizeCall } from "./summary.js";
+import { getSettings } from "../settings.js";
 
 /**
  * GPT-Live voice calls. Twilio Media Streams sends the caller's 8 kHz μ-law
@@ -32,16 +33,72 @@ import { finalizeCall } from "./summary.js";
 export const streamServer = new WebSocketServer({ noServer: true });
 const openai = config.voice.engine === "gpt-live" ? new OpenAI() : undefined;
 
-export function handleStreamUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
-  streamServer.handleUpgrade(req, socket, head, (ws) => new LiveCall(ws));
-}
-
 /** Twilio sends 20 ms frames; buffer about 3 s of audio while GPT-Live starts. */
 const MAX_PENDING_FRAMES = 150;
 /** Twilio must identify the call (with our token) promptly or we drop it. */
 const START_TIMEOUT_MS = 10_000;
-/** Time to let a goodbye play before hanging up. */
-const HANGUP_DELAY_MS = 6_000;
+/** A prewarmed session whose call never streams (hung up during the greeting) is dropped. */
+const PREWARM_TTL_MS = 90_000;
+/** The agent's speech counts as finished after this much silence from GPT-Live. */
+const SPEECH_SETTLE_MS = 800;
+/** Upper bound on waiting for a goodbye to finish before hanging up anyway. */
+const MAX_GOODBYE_MS = 15_000;
+/** End the call if nobody has spoken for this long. */
+const IDLE_HANGUP_MS = 45_000;
+
+/**
+ * GPT-Live sessions started while Twilio plays the greeting, keyed by the
+ * call's stream token, so the model is ready the moment the greeting ends.
+ */
+const prewarmed = new Map<string, LiveCall>();
+
+export function prewarmLiveCall(token: string, session: RelaySession): void {
+  const call = new LiveCall(session);
+  prewarmed.set(token, call);
+  call.start().catch((err) => console.error("GPT-Live prewarm failed", err));
+  setTimeout(() => {
+    if (prewarmed.get(token) !== call) return;
+    prewarmed.delete(token);
+    call.abandon();
+  }, PREWARM_TTL_MS).unref();
+}
+
+/** Drop a prewarmed session for a call that ended before its audio stream started. */
+export function dropPrewarmedCall(conversationId: number): void {
+  for (const [token, call] of prewarmed) {
+    if (call.conversationId !== conversationId) continue;
+    prewarmed.delete(token);
+    call.abandon();
+  }
+}
+
+export function handleStreamUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+  streamServer.handleUpgrade(req, socket, head, (ws) => {
+    // Until Twilio's "start" message proves which call this is, nothing else is accepted.
+    const timer = setTimeout(() => ws.close(), START_TIMEOUT_MS);
+    const onFirst = (data: unknown) => {
+      const msg = JSON.parse(String(data)) as TwilioStreamMessage;
+      if (msg.event === "connected") return;
+      ws.off("message", onFirst);
+      clearTimeout(timer);
+      const token = msg.start?.customParameters?.token ?? "";
+      const session = msg.event === "start" ? takeRelaySession(token) : undefined;
+      if (!session) {
+        console.warn("Media stream with an invalid or expired token; closing");
+        ws.close();
+        return;
+      }
+      let call = prewarmed.get(token);
+      prewarmed.delete(token);
+      if (!call) {
+        call = new LiveCall(session);
+        call.start().catch((err) => console.error("GPT-Live start failed", err));
+      }
+      call.attach(ws, msg.start!).catch((err) => console.error("Attaching call stream failed", err));
+    };
+    ws.on("message", onFirst);
+  });
+}
 
 interface TwilioStreamMessage {
   event: "connected" | "start" | "media" | "dtmf" | "mark" | "stop";
@@ -49,11 +106,13 @@ interface TwilioStreamMessage {
   start?: { streamSid: string; callSid: string; customParameters?: Record<string, string> };
   media?: { payload: string; track?: string };
   dtmf?: { digit: string };
+  mark?: { name: string };
 }
 
 class LiveCall {
-  private session?: RelaySession;
+  private twilio?: WebSocket;
   private user?: User;
+  private ready: Promise<void> = Promise.resolve();
   private streamSid = "";
   private callSid = "";
   private live?: LiveWS;
@@ -73,14 +132,40 @@ class LiveCall {
   private hangingUp = false;
   private closed = false;
   private timers: NodeJS.Timeout[] = [];
+  private lastOutputAt = 0;
+  private lastActivityAt = Date.now();
+  private finishing = false;
 
-  constructor(private twilio: WebSocket) {
-    twilio.on("message", (data) => this.onTwilio(data.toString()).catch((err) => this.fail("Twilio message error", err)));
-    twilio.on("close", () => this.shutdown());
-    twilio.on("error", (err) => console.error("Twilio stream socket error", err));
-    this.timers.push(setTimeout(() => !this.session && twilio.close(), START_TIMEOUT_MS));
+  constructor(private session: RelaySession) {
     this.grouper.on("segment.updated", (s) => this.upsertSegment(s));
     this.grouper.on("segment.closed", ({ segment }) => this.saveSegment(segment));
+    // The greeting is played by Twilio's <Say> before the audio stream starts.
+    this.transcript.push({ id: "greeting", speaker: "Assistant", text: session.greeting });
+  }
+
+  get conversationId(): number {
+    return this.session.conversationId;
+  }
+
+  /** Load context and open the GPT-Live session; safe to run before the call's audio arrives. */
+  start(): Promise<void> {
+    this.ready = (async () => {
+      this.user = (await getUser(this.session.userId))!;
+      await this.prepareBackend();
+      this.connectLive(await this.liveSessionConfig());
+    })();
+    return this.ready;
+  }
+
+  /** The call ended before its audio stream ever started. */
+  abandon(): void {
+    this.closed = true;
+    this.abort.abort();
+    try {
+      this.live?.close({ code: 1000, reason: "call not connected" });
+    } catch {
+      // already closed
+    }
   }
 
   private controls: CallControls = {
@@ -96,41 +181,20 @@ class LiveCall {
 
   // ---- Twilio side --------------------------------------------------------
 
-  private async onTwilio(raw: string): Promise<void> {
-    const msg = JSON.parse(raw) as TwilioStreamMessage;
-    switch (msg.event) {
-      case "start":
-        await this.onStart(msg.start!);
-        break;
-      case "media":
-        if (!this.session || msg.media?.track === "outbound") return;
-        if (this.liveReady) this.live!.send({ type: "session.input_audio.append", audio: msg.media!.payload });
-        else if (this.pendingAudio.length < MAX_PENDING_FRAMES) this.pendingAudio.push(msg.media!.payload);
-        break;
-      case "dtmf":
-        if (this.session) await addMessage(this.session.conversationId, "event", `Caller pressed ${msg.dtmf?.digit}`);
-        break;
-      case "stop":
-        this.twilio.close();
-        break;
-    }
-  }
-
-  private async onStart(start: NonNullable<TwilioStreamMessage["start"]>): Promise<void> {
-    const session = takeRelaySession(start.customParameters?.token ?? "");
-    if (!session) {
-      console.warn("Media stream with an invalid or expired token; closing");
-      this.twilio.close();
-      return;
-    }
-    this.session = session;
+  /** Connect the call's Twilio audio stream to this (possibly already running) session. */
+  async attach(ws: WebSocket, start: NonNullable<TwilioStreamMessage["start"]>): Promise<void> {
+    this.twilio = ws;
     this.streamSid = start.streamSid;
     this.callSid = start.callSid;
-    this.user = (await getUser(session.userId))!;
+    ws.on("message", (data) => this.onTwilio(data.toString()).catch((err) => this.fail("Twilio message error", err)));
+    ws.on("close", () => this.shutdown());
+    ws.on("error", (err) => console.error("Twilio stream socket error", err));
+    this.lastActivityAt = Date.now();
 
+    const s = this.session;
     const inbound = await query<{ direction: string }>(
       "UPDATE conversations SET call_sid = COALESCE(call_sid, $2), call_status = 'in-progress' WHERE id = $1 RETURNING direction",
-      [session.conversationId, start.callSid],
+      [s.conversationId, start.callSid],
     );
     // Outbound calls are recorded from answer via calls.create; inbound ones start here.
     if (inbound[0]?.direction === "inbound") {
@@ -142,19 +206,42 @@ class LiveCall {
         })
         .catch((err) => console.error("Could not start call recording", err));
     }
-    // The disclosure greeting was played by <Say> before the stream started.
-    await addMessage(session.conversationId, "assistant", session.greeting);
-    this.transcript.push({ id: "greeting", speaker: "Assistant", text: session.greeting });
+    await addMessage(s.conversationId, "assistant", s.greeting);
 
+    const { maxCallMinutes } = await getSettings();
     this.timers.push(
       setTimeout(() => {
-        this.instruct("The call has reached its time limit. Tell the other person you have to go and say goodbye now.");
-        this.hangUp(HANGUP_DELAY_MS * 2);
-      }, config.agent.maxCallMinutes * 60 * 1000),
+        this.instruct("The call has reached its time limit. Tell the other person you have to go and say goodbye now, briefly.");
+        this.finishAfterSpeech(2000);
+      }, maxCallMinutes * 60 * 1000),
+      setInterval(() => {
+        if (Date.now() - this.lastActivityAt < IDLE_HANGUP_MS || this.finishing) return;
+        this.instruct("Nobody has said anything for a while. Say a brief goodbye.");
+        this.finishAfterSpeech(2000);
+      }, 5000),
     );
+    await this.ready;
+  }
 
-    await this.prepareBackend();
-    this.connectLive(await this.liveSessionConfig());
+  private async onTwilio(raw: string): Promise<void> {
+    const msg = JSON.parse(raw) as TwilioStreamMessage;
+    switch (msg.event) {
+      case "media":
+        if (msg.media?.track === "outbound") return;
+        if (this.liveReady) this.live!.send({ type: "session.input_audio.append", audio: msg.media!.payload });
+        else if (this.pendingAudio.length < MAX_PENDING_FRAMES) this.pendingAudio.push(msg.media!.payload);
+        break;
+      case "mark":
+        // Twilio echoes a mark once all audio sent before it has played.
+        if (msg.mark?.name === "hangup") this.hangUp();
+        break;
+      case "dtmf":
+        await addMessage(this.session.conversationId, "event", `Caller pressed ${msg.dtmf?.digit}`);
+        break;
+      case "stop":
+        this.twilio?.close();
+        break;
+    }
   }
 
   private playToCaller(audio: Buffer): void {
@@ -163,13 +250,13 @@ class LiveCall {
   }
 
   private sendTwilio(payload: Record<string, unknown>): void {
-    if (this.twilio.readyState === WebSocket.OPEN) this.twilio.send(JSON.stringify({ ...payload, streamSid: this.streamSid }));
+    if (this.twilio?.readyState === WebSocket.OPEN) this.twilio.send(JSON.stringify({ ...payload, streamSid: this.streamSid }));
   }
 
   // ---- GPT-Live side ------------------------------------------------------
 
   private async liveSessionConfig(): Promise<SessionConfig> {
-    const s = this.session!;
+    const s = this.session;
     let instructions: string;
     if (s.mode === "user") {
       instructions = liveUserInstructions(await userDetails(this.user!));
@@ -199,7 +286,7 @@ class LiveCall {
     live.on("close", (code, reason) => {
       if (!this.closed) {
         console.warn(`GPT-Live socket closed (${code} ${reason}); hanging up`);
-        this.hangUp(0);
+        this.hangUp();
       }
     });
     live.on("event", (event) => this.onLive(event));
@@ -213,9 +300,15 @@ class LiveCall {
         for (const audio of this.pendingAudio.splice(0)) this.live!.send({ type: "session.input_audio.append", audio });
         break;
       case "session.output_audio.delta":
+        // Before the stream attaches, the greeting is still playing; drop anything early.
+        if (!this.twilio) return;
+        this.lastOutputAt = this.lastActivityAt = Date.now();
         this.sendTwilio({ event: "media", media: { payload: event.delta } });
         break;
       case "session.input_transcript.delta":
+        this.lastActivityAt = Date.now();
+        if (!this.transcriptDone) this.grouper.push(event);
+        break;
       case "session.output_transcript.delta":
         if (!this.transcriptDone) this.grouper.push(event);
         break;
@@ -226,7 +319,7 @@ class LiveCall {
         this.closeTranscript();
         if (!this.hangingUp && event.reason !== "close_requested") {
           console.warn(`GPT-Live session closed: ${event.reason}`);
-          this.hangUp(0);
+          this.hangUp();
         }
         break;
     }
@@ -247,7 +340,7 @@ class LiveCall {
 
   private speakerLabel(speaker: "user" | "assistant"): string {
     if (speaker === "assistant") return "Assistant";
-    return this.session?.mode === "user" ? "User" : "Other party";
+    return this.session.mode === "user" ? "User" : "Other party";
   }
 
   private upsertSegment(segment: TranscriptSegment): void {
@@ -259,7 +352,7 @@ class LiveCall {
 
   private saveSegment(segment: TranscriptSegment): void {
     this.upsertSegment(segment);
-    if (!this.session || !segment.text.trim()) return;
+    if (!segment.text.trim()) return;
     const role = segment.speaker === "assistant" ? "assistant" : this.session.mode === "user" ? "user" : "counterpart";
     addMessage(this.session.conversationId, role, segment.text.trim()).catch((err) => this.fail("Saving transcript failed", err));
   }
@@ -267,7 +360,7 @@ class LiveCall {
   // ---- Delegations, handled by the agent model --------------------------------------
 
   private async prepareBackend(): Promise<void> {
-    const s = this.session!;
+    const s = this.session;
     if (s.mode === "user") {
       this.backendSystem = `${USER_ASSISTANT_PROMPT}\n\n${LIVE_BACKEND_ADDENDUM}`;
       this.backendDetails = await userDetails(this.user!);
@@ -288,7 +381,7 @@ class LiveCall {
 
   private async runDelegation(delegationId: string): Promise<void> {
     if (this.closed) return;
-    const s = this.session!;
+    const s = this.session;
     const transcript = this.transcript.map((l) => `${l.speaker}: ${l.text}`).join("\n");
     const content: ContentPart[] = [
       ...this.backendPreamble,
@@ -315,8 +408,18 @@ class LiveCall {
     }
 
     if (this.endRequested) {
-      result = "The call is ending now. Say a brief goodbye.";
-      this.hangUp(HANGUP_DELAY_MS);
+      // The goodbye has been said; end silently once it finishes playing.
+      this.transcript.push({ id: `delegation-${delegationId}`, speaker: "Backend result", text: "Ending the call." });
+      if (this.liveReady) {
+        this.live!.send({
+          type: "session.thinking.append",
+          content: "The call is being ended now. Do not say anything else.",
+          delegation_id: delegationId,
+        });
+      }
+      await addMessage(s.conversationId, "event", "Agent ended the call");
+      this.finishAfterSpeech(0);
+      return;
     }
     this.transcript.push({ id: `delegation-${delegationId}`, speaker: "Backend result", text: result });
     if (this.liveReady) {
@@ -326,20 +429,40 @@ class LiveCall {
 
   // ---- Teardown -----------------------------------------------------------
 
-  private hangUp(delayMs: number): void {
+  /**
+   * Hang up once the agent has finished talking: wait until GPT-Live has been
+   * quiet briefly, then send Twilio a mark, which comes back when everything
+   * queued before it has actually played to the caller.
+   */
+  private finishAfterSpeech(graceMs: number): void {
+    if (this.finishing) return;
+    this.finishing = true;
+    const startedAt = Date.now();
+    const poll = setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= MAX_GOODBYE_MS) {
+        clearInterval(poll);
+        this.hangUp();
+      } else if (elapsed >= graceMs && Date.now() - this.lastOutputAt >= SPEECH_SETTLE_MS) {
+        clearInterval(poll);
+        this.sendTwilio({ event: "mark", mark: { name: "hangup" } });
+        // If the mark never comes back, still hang up.
+        this.timers.push(setTimeout(() => this.hangUp(), 8000));
+      }
+    }, 100);
+    this.timers.push(poll);
+  }
+
+  private hangUp(): void {
     if (this.hangingUp) return;
     this.hangingUp = true;
-    this.timers.push(
-      setTimeout(() => {
-        if (this.liveReady) this.live!.send({ type: "session.close" });
-        if (this.callSid) {
-          twilioClient
-            .calls(this.callSid)
-            .update({ status: "completed" })
-            .catch((err) => this.fail("Hangup failed", err));
-        }
-      }, delayMs),
-    );
+    if (this.liveReady) this.live!.send({ type: "session.close" });
+    if (this.callSid) {
+      twilioClient
+        .calls(this.callSid)
+        .update({ status: "completed" })
+        .catch((err) => this.fail("Hangup failed", err));
+    }
   }
 
   private shutdown(): void {
@@ -353,10 +476,8 @@ class LiveCall {
     } catch {
       // already closed
     }
-    if (this.session) {
-      const conversationId = this.session.conversationId;
-      // Let the transcript writes from grouper.close() land before summarizing.
-      setTimeout(() => finalizeCall(conversationId).catch((err) => this.fail("Call finalize failed", err)), 1000);
-    }
+    const conversationId = this.session.conversationId;
+    // Let the transcript writes from grouper.close() land before summarizing.
+    setTimeout(() => finalizeCall(conversationId).catch((err) => this.fail("Call finalize failed", err)), 1000);
   }
 }

@@ -63,3 +63,18 @@ test("DTMF tones are 8 kHz mu-law: 200 ms tone plus 100 ms gap per digit", () =>
   assert.equal(dtmfAudio("1w2").length, 2400 * 2 + 4000);
   assert.equal(dtmfAudio("x").length, 0);
 });
+
+const { fillGreeting, validateSettings, DEFAULT_SETTINGS } = await import("../src/settings.js");
+
+test("greeting templates fill placeholders and keep unknown ones", () => {
+  assert.equal(fillGreeting("Hi {recipient}, {agent} for {requester}. {other}", { recipient: "Mike", agent: "Tuah", requester: "Pat" }), "Hi Mike, Tuah for Pat. {other}");
+});
+
+test("settings validation keeps the disclosures and sane hours", () => {
+  assert.equal(validateSettings(DEFAULT_SETTINGS), null);
+  assert.match(validateSettings({ ...DEFAULT_SETTINGS, greetingOutbound: "Hi, it's {agent} for {requester}, an AI." })!, /recorded/);
+  assert.match(validateSettings({ ...DEFAULT_SETTINGS, greetingCallback: "Hi there. This call is recorded." })!, /AI assistant/);
+  assert.match(validateSettings({ ...DEFAULT_SETTINGS, contactHoursStart: 21, contactHoursEnd: 8 })!, /hours/);
+  assert.match(validateSettings({ ...DEFAULT_SETTINGS, maxCallMinutes: 0 })!, /time limit/);
+  assert.match(validateSettings({ ...DEFAULT_SETTINGS, timezone: "Nowhere/Land" })!, /time zone/);
+});

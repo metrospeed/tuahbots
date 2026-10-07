@@ -12,7 +12,9 @@ import {
   requireAdmin,
   setSessionCookie,
 } from "./auth.js";
-import { esc, fmtDate, layout, loginPage } from "./views.js";
+import { esc, fmtDate, layout, loginPage, setCallsEnabledBanner } from "./views.js";
+import { DEFAULT_SETTINGS, GREETING_PLACEHOLDERS, getSettings, saveSettings, validateSettings, type Settings } from "../settings.js";
+import { twilioClient } from "../twilio.js";
 
 export const adminRouter = express.Router();
 
@@ -35,6 +37,10 @@ adminRouter.post("/admin/logout", (_req, res) => {
 });
 
 adminRouter.use("/admin", requireAdmin);
+adminRouter.use("/admin", async (_req, _res, next) => {
+  setCallsEnabledBanner((await getSettings()).callsEnabled);
+  next();
+});
 
 adminRouter.get("/admin", (_req, res) => res.redirect("/admin/conversations"));
 
@@ -360,3 +366,108 @@ adminRouter.post("/admin/blocked/delete", async (req, res) => {
   res.redirect("/admin/blocked");
 });
 
+
+// ---- Settings ------------------------------------------------------------
+
+const GREETING_FIELDS: Array<[keyof typeof GREETING_PLACEHOLDERS, string, string]> = [
+  ["greetingOutbound", "Calls the agent places to other people", "Played when the person answers."],
+  ["greetingUserInbound", "Invited users calling the agent", "Only for users with a phone number on file."],
+  ["greetingCallback", "Other people calling back", "When someone the agent called calls the number back."],
+];
+
+function settingsPage(settings: Settings, notice = "", error = ""): string {
+  const greetings = GREETING_FIELDS.map(
+    ([key, label, hint]) => `<fieldset><legend>${esc(label)}</legend>
+      <textarea class="wide" name="${key}" rows="3" maxlength="600" required>${esc(settings[key])}</textarea>
+      <div class="small muted">${esc(hint)} Placeholders: ${GREETING_PLACEHOLDERS[key].map((p) => `<code>${p}</code>`).join(", ")}.
+      Default: <i>${esc(DEFAULT_SETTINGS[key])}</i></div></fieldset>`,
+  ).join("");
+  return layout(
+    "Settings",
+    `${notice ? `<div class="card ok">${esc(notice)}</div>` : ""}${error ? `<div class="card bad">${esc(error)}</div>` : ""}
+     <div class="card"><h3>Calls</h3>
+      <form method="post" action="/admin/settings/calls" class="switch"
+        ${settings.callsEnabled ? `onsubmit="return confirm('Turn off all calls? Calls in progress will be hung up, and the agent won\\'t place or answer calls until you turn them back on.')"` : ""}>
+        <span class="state ${settings.callsEnabled ? "ok" : "bad"}">${settings.callsEnabled ? "On" : "Off"}</span>
+        <input type="hidden" name="enabled" value="${settings.callsEnabled ? "0" : "1"}">
+        <button class="${settings.callsEnabled ? "danger" : "primary"}">${settings.callsEnabled ? "Turn off all calls" : "Turn calls back on"}</button>
+        <span class="small muted">${settings.callsEnabled ? "Turning calls off hangs up any call in progress. The web chat keeps working." : "The agent won't place or answer calls. The web chat still works."}</span>
+      </form></div>
+     <form method="post" action="/admin/settings">
+      <div class="card"><h3>Recording greetings</h3>
+       <p class="small muted">Played word for word at the start of every call, before the AI joins. Each one must say the call is recorded, and greetings to other people must say it's an AI assistant.</p>
+       ${greetings}</div>
+      <div class="card"><h3>Calling hours and time limit</h3>
+       <div class="row">
+        <label>Calls allowed from (hour, 0–23)<input type="number" name="contactHoursStart" min="0" max="23" value="${settings.contactHoursStart}" required></label>
+        <label>until (hour, 1–24)<input type="number" name="contactHoursEnd" min="1" max="24" value="${settings.contactHoursEnd}" required></label>
+        <label>Time zone<input name="timezone" value="${esc(settings.timezone)}" required placeholder="America/New_York"></label>
+        <label>Call time limit (minutes)<input type="number" name="maxCallMinutes" min="1" max="60" value="${settings.maxCallMinutes}" required></label>
+       </div>
+       <p class="small muted">Hours apply to calls the agent places. At the time limit the agent says goodbye and hangs up.</p></div>
+      <button class="primary">Save settings</button>
+     </form>`,
+    "/admin/settings",
+  );
+}
+
+adminRouter.get("/admin/settings", async (req, res) => {
+  const ended = Number(req.query.ended) || 0;
+  const notice =
+    req.query.saved !== undefined
+      ? "Settings saved."
+      : req.query.calls === "on"
+        ? "Calls are on."
+        : req.query.calls === "off"
+          ? `Calls are off.${ended ? ` Ended ${ended} call${ended === 1 ? "" : "s"} in progress.` : ""}`
+          : "";
+  res.send(settingsPage(await getSettings(), notice));
+});
+
+adminRouter.post("/admin/settings", async (req, res) => {
+  const current = await getSettings();
+  const next: Settings = {
+    ...current,
+    greetingOutbound: String(req.body.greetingOutbound ?? "").trim(),
+    greetingUserInbound: String(req.body.greetingUserInbound ?? "").trim(),
+    greetingCallback: String(req.body.greetingCallback ?? "").trim(),
+    contactHoursStart: Number(req.body.contactHoursStart),
+    contactHoursEnd: Number(req.body.contactHoursEnd),
+    timezone: String(req.body.timezone ?? "").trim(),
+    maxCallMinutes: Number(req.body.maxCallMinutes),
+  };
+  const error = validateSettings(next);
+  if (error) return void res.status(400).send(settingsPage(next, "", error));
+  const { callsEnabled: _unchanged, ...changes } = next;
+  await saveSettings(changes);
+  res.redirect("/admin/settings?saved=1");
+});
+
+adminRouter.post("/admin/settings/calls", async (req, res) => {
+  const enabled = req.body.enabled === "1";
+  await saveSettings({ callsEnabled: enabled });
+  setCallsEnabledBanner(enabled);
+  let ended = 0;
+  if (!enabled) ended = await endActiveCalls();
+  res.redirect(`/admin/settings?calls=${enabled ? "on" : "off"}&ended=${ended}`);
+});
+
+/** Hang up (or cancel, if still ringing) every call that hasn't ended. */
+async function endActiveCalls(): Promise<number> {
+  const active = await query<Conversation>(
+    `SELECT * FROM conversations
+     WHERE call_sid IS NOT NULL AND ended_at IS NULL AND started_at > now() - interval '3 hours'
+       AND COALESCE(call_status, '') NOT IN ('completed', 'busy', 'no-answer', 'failed', 'canceled')`,
+  );
+  let ended = 0;
+  for (const c of active) {
+    const ringing = ["queued", "initiated", "ringing"].includes(c.call_status ?? "");
+    try {
+      await twilioClient.calls(c.call_sid!).update({ status: ringing ? "canceled" : "completed" });
+      ended++;
+    } catch (err) {
+      console.error(`Could not end call ${c.call_sid}`, err);
+    }
+  }
+  return ended;
+}

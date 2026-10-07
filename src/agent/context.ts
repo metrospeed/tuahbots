@@ -2,6 +2,7 @@ import { config } from "../config.js";
 import type { ContentPart, InputItem } from "./llm.js";
 import { listMessages, query, type Attachment, type Message, type Task, type User } from "../db/index.js";
 import { formatPhone } from "../phone.js";
+import { getSettings } from "../settings.js";
 import { describeTask, recentTasks, userChatConversation } from "../tasks.js";
 
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
@@ -19,8 +20,12 @@ export function nowLine(): string {
 
 export async function userDetails(user: User): Promise<string> {
   const tasks = await recentTasks(user.id, 5);
+  const settings = await getSettings();
   return [
     nowLine(),
+    settings.callsEnabled
+      ? `Calls to other people can be placed between ${settings.contactHoursStart}:00 and ${settings.contactHoursEnd}:00 (${settings.timezone}).`
+      : "Calling is currently turned off by the administrator. You can't place calls; tell the user if they ask.",
     `You are talking with ${user.name}${user.phone ? ` (${formatPhone(user.phone)})` : ""}.`,
     user.notes ? `Notes about this user from the administrator: ${user.notes}` : "",
     tasks.length ? `Their most recent tasks:\n${tasks.map(describeTask).join("\n\n")}` : "They have no tasks yet.",

@@ -4,15 +4,28 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import twilio from "twilio";
 import { WebSocket, WebSocketServer } from "ws";
+import http from "node:http";
+import { functionCall, sendResponseStream, textMessage } from "./fake-openai.js";
 
 const enabled = !!process.env.TEST_DATABASE_URL;
 
-// A stand-in for the GPT-Live API, so calls can be exercised end to end.
-const fakeLive = new WebSocketServer({ port: 0 });
-await new Promise((resolve) => fakeLive.once("listening", resolve));
-process.env.OPENAI_BASE_URL = `http://127.0.0.1:${(fakeLive.address() as AddressInfo).port}/v1`;
-// The fake server also answers the agent model's HTTP requests with an error
-// (426 Upgrade Required), so the app's failure handling is exercised too.
+// A stand-in for the OpenAI API: GPT-Live over WebSocket, and the Responses API
+// over HTTP. In a call, the agent model ends the call; elsewhere it errors, so
+// the app's failure handling is exercised too.
+const fakeOpenAI = http.createServer((req, res) => {
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    const request = JSON.parse(body || "{}");
+    const tools: string[] = (request.tools ?? []).map((t: any) => t.name);
+    const answered = (request.input ?? []).some((i: any) => i.type === "function_call_output");
+    if (!tools.includes("end_call")) return void res.writeHead(400).end(JSON.stringify({ error: { message: "test" } }));
+    sendResponseStream(res, request.model, answered ? [textMessage("Ending the call.")] : [functionCall("end_call", { reason: "done" })]);
+  });
+});
+const fakeLive = new WebSocketServer({ server: fakeOpenAI });
+await new Promise<void>((resolve) => fakeOpenAI.listen(0, resolve));
+process.env.OPENAI_BASE_URL = `http://127.0.0.1:${(fakeOpenAI.address() as AddressInfo).port}/v1`;
 const liveConnections: Array<{ ws: WebSocket; path: string; received: any[] }> = [];
 fakeLive.on("connection", (ws, req) => {
   const conn = { ws, path: req.url ?? "", received: [] as any[] };
@@ -36,6 +49,7 @@ before(async () => {
 
 after(async () => {
   fakeLive.close();
+  fakeOpenAI.close();
   if (!enabled) return;
   server.close();
   await db.pool.end();
@@ -160,19 +174,28 @@ test("invited users get a recorded-call disclosure and a relay session", { skip:
   send({ type: "session.output_audio.delta", delta: "//8=" });
   await waitFor(() => toCaller.some((m) => m.event === "media" && m.media.payload === "//8=" && m.streamSid === "MZ1"));
 
-  // Transcripts are stored; a delegation gets an answer even when the backend fails.
-  send({ type: "session.input_transcript.delta", event_id: "t1", delta: "Call my plumber please", start_ms: 3000, end_ms: 4000 });
-  send({ type: "session.output_transcript.delta", event_id: "t2", delta: "Sure, one moment.", start_ms: 4500, end_ms: 5500 });
+  // Transcripts are stored. When the conversation is over, GPT-Live delegates
+  // and the agent model ends the call: silently, once the goodbye has played.
+  send({ type: "session.input_transcript.delta", event_id: "t1", delta: "That's all, thanks!", start_ms: 3000, end_ms: 4000 });
+  send({ type: "session.output_transcript.delta", event_id: "t2", delta: "You're welcome, bye!", start_ms: 4500, end_ms: 5500 });
   send({ type: "session.delegation.created", event_id: "d1", offset_ms: 5600, delegation: { id: "del_1", target: "client", type: "delegation" } });
-  await waitFor(() => live.received.some((e) => e.type === "session.commentary.append" && e.delegation_id === "del_1"));
+  await waitFor(() => live.received.some((e) => e.type === "session.thinking.append" && e.delegation_id === "del_1"));
+  assert.ok(!live.received.some((e) => e.type === "session.commentary.append"), "no extra goodbye is requested");
+
+  // We ask Twilio to tell us when queued audio has played, and only then hang up.
+  await waitFor(() => toCaller.some((m) => m.event === "mark" && m.mark.name === "hangup"));
+  assert.ok(!live.received.some((e) => e.type === "session.close"));
+  twilioSide.send(JSON.stringify({ event: "mark", streamSid: "MZ1", mark: { name: "hangup" } }));
+  await waitFor(() => live.received.some((e) => e.type === "session.close"));
 
   twilioSide.send(JSON.stringify({ event: "stop", streamSid: "MZ1" }));
   await waitFor(() => live.ws.readyState === WebSocket.CLOSED);
   const conversation = (await db.query("SELECT id FROM conversations WHERE call_sid = 'CAuser'"))[0];
   await new Promise((r) => setTimeout(r, 300));
   const lines = await db.query("SELECT role, body FROM messages WHERE conversation_id = $1 ORDER BY id", [conversation.id]);
-  assert.ok(lines.some((l) => l.role === "user" && l.body === "Call my plumber please"));
-  assert.ok(lines.some((l) => l.role === "assistant" && l.body === "Sure, one moment."));
+  assert.ok(lines.some((l) => l.role === "user" && l.body === "That's all, thanks!"));
+  assert.ok(lines.some((l) => l.role === "assistant" && l.body === "You're welcome, bye!"));
+  assert.ok(lines.some((l) => l.role === "event" && l.body === "Agent ended the call"));
 
   const page = await (await fetch(`${base}/admin/conversations`, { headers: { Cookie: cookie } })).text();
   assert.match(page, /User call/);
@@ -246,4 +269,98 @@ test("invited users chat on the web via their invite link", { skip: !enabled }, 
   await fetch(`${base}/admin/users/${userId}/link`, { method: "POST", headers: { Cookie: cookie } });
   assert.equal((await fetch(`${base}/app/api/state`, { headers: { Cookie: userCookie } })).status, 401);
   assert.equal((await fetch(base + link, { redirect: "manual" })).status, 404);
+});
+
+test("admin settings control greetings, hours, time limit and the calls switch", { skip: !enabled }, async () => {
+  const cookie = await login();
+  const form = (fields: Record<string, string>) =>
+    fetch(`${base}/admin/settings`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      body: new URLSearchParams(fields),
+    });
+  const valid = {
+    greetingOutbound: "Hello {recipient}, {agent} here, an AI assistant for {requester}. This call is recorded.",
+    greetingUserInbound: "Hey {caller}! {agent} here. This call is recorded.",
+    greetingCallback: "Hi, {agent}, AI assistant for {requester}. This call is recorded.",
+    contactHoursStart: "9",
+    contactHoursEnd: "17",
+    timezone: "America/Chicago",
+    maxCallMinutes: "5",
+  };
+
+  // Greetings must keep the recording disclosure.
+  const bad = await form({ ...valid, greetingUserInbound: "Hey {caller}!" });
+  assert.equal(bad.status, 400);
+  assert.match(await bad.text(), /must say the call is recorded/);
+  assert.equal((await form({ ...valid, contactHoursStart: "18" })).status, 400);
+  assert.equal((await form({ ...valid, timezone: "Mars/Olympus" })).status, 400);
+
+  assert.equal((await form(valid)).status, 302);
+  const page = await (await fetch(`${base}/admin/settings`, { headers: { Cookie: cookie } })).text();
+  assert.match(page, /America\/Chicago/);
+  assert.match(page, /value="5"/);
+
+  // The custom greeting is what Twilio plays to an invited caller.
+  const call = await (await twilioPost("/twilio/voice", { From: "+14155552671", CallSid: "CAgreet" })).text();
+  assert.match(call, /<Say[^>]*>Hey Pat! Tuah here\. This call is recorded\.<\/Say>/);
+
+  // Calls off: callers are turned away, the chat agent is told, and a banner shows.
+  const off = await fetch(`${base}/admin/settings/calls`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    body: "enabled=0",
+  });
+  assert.match(await off.text(), /Calls are off/);
+  const rejected = await (await twilioPost("/twilio/voice", { From: "+14155552671", CallSid: "CAoff" })).text();
+  assert.match(rejected, /isn't taking calls right now/);
+  assert.doesNotMatch(rejected, /<Stream/);
+  const admin = await (await fetch(`${base}/admin/conversations`, { headers: { Cookie: cookie } })).text();
+  assert.match(admin, /Calls are turned off/);
+
+  await fetch(`${base}/admin/settings/calls`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    body: "enabled=1",
+  });
+  const back = await (await twilioPost("/twilio/voice", { From: "+14155552671", CallSid: "CAon" })).text();
+  assert.match(back, /<Stream/);
+});
+
+test("an answered outbound call plays the configured greeting, unless calls were turned off", { skip: !enabled }, async () => {
+  const cookie = await login();
+  const user = (await db.query("SELECT * FROM users WHERE phone = '+14155552671'"))[0];
+  const task = (
+    await db.query(
+      "INSERT INTO tasks (user_id, kind, target_phone, target_name, objective, status) VALUES ($1, 'call', '+14155550123', 'Mike', 'Quote status', 'in_progress') RETURNING *",
+      [user.id],
+    )
+  )[0];
+  const conversation = (
+    await db.query(
+      "INSERT INTO conversations (kind, user_id, task_id, counterpart_phone, direction, call_sid) VALUES ('task_call', $1, $2, '+14155550123', 'outbound', 'CAout') RETURNING *",
+      [user.id, task.id],
+    )
+  )[0];
+  const path = `/twilio/voice/answered/${conversation.id}`;
+
+  // Another call can't use this conversation's instructions.
+  assert.match(await (await twilioPost(path, { CallSid: "CAother" })).text(), /<Hangup\/>/);
+
+  const xml = await (await twilioPost(path, { CallSid: "CAout" })).text();
+  assert.match(xml, /<Say[^>]*>Hello Mike, Tuah here, an AI assistant for Pat Example\. This call is recorded\.<\/Say>/);
+  assert.match(xml, /<Stream url="wss:\/\/agent\.test\/twilio\/stream">/);
+
+  await fetch(`${base}/admin/settings/calls`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    body: "enabled=0",
+  });
+  assert.match(await (await twilioPost(path, { CallSid: "CAout" })).text(), /^<Response><Hangup\/><\/Response>$/);
+  await fetch(`${base}/admin/settings/calls`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    body: "enabled=1",
+  });
 });

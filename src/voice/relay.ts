@@ -10,6 +10,7 @@ import { addMessage, getTask, getUser, query, type User } from "../db/index.js";
 import { twilioClient } from "../twilio.js";
 import { takeRelaySession, type RelaySession } from "./sessions.js";
 import { finalizeCall } from "./summary.js";
+import { getSettings } from "../settings.js";
 
 export const relayServer = new WebSocketServer({ noServer: true });
 
@@ -121,7 +122,7 @@ class RelayCall {
         console.error("Could not start call recording", err);
       }
     }
-    const limitMs = config.agent.maxCallMinutes * 60 * 1000;
+    const limitMs = (await getSettings()).maxCallMinutes * 60 * 1000;
     this.hardLimit = setTimeout(() => {
       this.send({ type: "text", token: "I'm sorry, we've reached the time limit for this call. Goodbye.", last: true });
       setTimeout(() => this.send({ type: "end" }), 6000);

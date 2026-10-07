@@ -23,7 +23,14 @@ const NAV = [
   ["/admin/tasks", "Tasks"],
   ["/admin/users", "Invited users"],
   ["/admin/blocked", "Blocked numbers"],
+  ["/admin/settings", "Settings"],
 ];
+
+/** Refreshed by the admin router on each request so every page can show the calls-off banner. */
+let callsEnabled = true;
+export function setCallsEnabledBanner(enabled: boolean): void {
+  callsEnabled = enabled;
+}
 
 export function layout(title: string, body: string, active = ""): string {
   const nav = NAV.map(([href, label]) => `<a href="${href}" class="${href === active ? "on" : ""}">${label}</a>`).join("");
@@ -53,9 +60,15 @@ button{cursor:pointer}button.primary{background:var(--accent);color:#fff;border-
 form.inline{display:inline}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:end}.row label{display:flex;flex-direction:column;font-size:13px;color:var(--muted)}
 img.att{max-width:240px;max-height:240px;border-radius:8px;display:block;margin-top:6px}
 audio{width:100%}
+.callsoff{background:var(--bad);color:#fff;padding:8px 16px;text-align:center;font-weight:500}.callsoff a{color:#fff}
+.switch{display:flex;align-items:center;gap:16px;flex-wrap:wrap}.switch .state{font-size:20px;font-weight:600}
+button.danger{background:var(--bad);color:#fff;border-color:var(--bad)}
+fieldset{border:1px solid var(--line);border-radius:8px;padding:12px;margin:0 0 12px}legend{color:var(--muted);font-size:13px;padding:0 4px}
+textarea.wide{width:100%}
 </style></head><body>
 <header><b>${esc(config.agent.name)} admin</b>${nav}
 <form method="post" action="/admin/logout"><button>Log out</button></form></header>
+${callsEnabled ? "" : `<div class="callsoff">Calls are turned off. The agent won't place or answer any calls. <a href="/admin/settings">Settings</a></div>`}
 <main>${body}</main></body></html>`;
 }
 

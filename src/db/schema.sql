@@ -86,3 +86,11 @@ CREATE TABLE IF NOT EXISTS attachments (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS attachments_message_idx ON attachments (message_id);
+
+-- Admin-editable settings (calls on/off, greetings, hours, time limit).
+-- Missing keys fall back to the defaults in src/settings.ts.
+CREATE TABLE IF NOT EXISTS settings (
+  key         TEXT PRIMARY KEY,
+  value       JSONB NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
