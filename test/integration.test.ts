@@ -18,7 +18,8 @@ const fakeOpenAI = http.createServer((req, res) => {
   req.on("end", () => {
     const request = JSON.parse(body || "{}");
     const tools: string[] = (request.tools ?? []).map((t: any) => t.name);
-    const answered = (request.input ?? []).some((i: any) => i.type === "function_call_output");
+    // Summaries send a plain-string input; tool loops send a list of items.
+    const answered = Array.isArray(request.input) && request.input.some((i: any) => i.type === "function_call_output");
     if (!tools.includes("end_call")) return void res.writeHead(400).end(JSON.stringify({ error: { message: "test" } }));
     sendResponseStream(res, request.model, answered ? [textMessage("Ending the call.")] : [functionCall("end_call", { reason: "done" })]);
   });
@@ -48,7 +49,11 @@ before(async () => {
 });
 
 after(async () => {
+  // Prewarmed GPT-Live sessions for calls that never streamed are still open;
+  // drop them so the process can exit.
+  for (const client of fakeLive.clients) client.terminate();
   fakeLive.close();
+  fakeOpenAI.closeAllConnections();
   fakeOpenAI.close();
   if (!enabled) return;
   server.close();
