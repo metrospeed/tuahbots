@@ -1,0 +1,62 @@
+import "./env.js";
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+const { splitMessage } = await import("../src/twilio.js");
+const { validateInput } = await import("../src/agent/claude.js");
+const { toE164 } = await import("../src/phone.js");
+const { withLock } = await import("../src/lock.js");
+const { createRelaySession, takeRelaySession } = await import("../src/voice/sessions.js");
+const { buildRelayTwiml } = await import("../src/voice/twiml.js");
+
+test("splitMessage keeps short messages whole and splits long ones on whitespace", () => {
+  assert.deepEqual(splitMessage("hello", 10), ["hello"]);
+  const parts = splitMessage("aaaa bbbb cccc dddd", 10);
+  assert.ok(parts.every((p) => p.length <= 10));
+  assert.equal(parts.join(" "), "aaaa bbbb cccc dddd");
+});
+
+test("toE164 normalizes US numbers and rejects junk", () => {
+  assert.equal(toE164("(415) 555-2671"), "+14155552671");
+  assert.equal(toE164("+1 415 555 2671"), "+14155552671");
+  assert.equal(toE164("12345"), null);
+});
+
+test("validateInput checks required fields and types", () => {
+  const tool = {
+    name: "t",
+    input_schema: {
+      type: "object" as const,
+      properties: { phone: { type: "string" }, task_id: { type: "integer" } },
+      required: ["phone"],
+    },
+  };
+  assert.equal(validateInput(tool, { phone: "1" }), null);
+  assert.match(validateInput(tool, {})!, /Missing required field "phone"/);
+  assert.match(validateInput(tool, { phone: "1", task_id: 1.5 })!, /integer/);
+  assert.match(validateInput(tool, "nope")!, /INVALID_JSON/);
+});
+
+test("withLock serializes work per key", async () => {
+  const order: string[] = [];
+  const slow = withLock("k", async () => {
+    await new Promise((r) => setTimeout(r, 20));
+    order.push("first");
+  });
+  const fast = withLock("k", async () => order.push("second"));
+  await Promise.all([slow, fast]);
+  assert.deepEqual(order, ["first", "second"]);
+});
+
+test("relay session tokens are single use", () => {
+  const token = createRelaySession({ mode: "user", conversationId: 1, userId: 1, greeting: "hi" });
+  assert.equal(takeRelaySession(token)?.conversationId, 1);
+  assert.equal(takeRelaySession(token), undefined);
+});
+
+test("relay TwiML speaks an uninterruptible greeting and points at our websocket", () => {
+  const xml = buildRelayTwiml("tok", "This call is being recorded.");
+  assert.match(xml, /<ConversationRelay [^>]*url="wss:\/\/agent\.test\/twilio\/relay\?token=tok"/);
+  assert.match(xml, /welcomeGreeting="This call is being recorded\."/);
+  assert.match(xml, /welcomeGreetingInterruptible="none"/);
+});
