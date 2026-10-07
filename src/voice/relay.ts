@@ -3,7 +3,7 @@ import type { BetaContentBlockParam, BetaMessageParam } from "@anthropic-ai/sdk/
 import Anthropic from "@anthropic-ai/sdk";
 import { WebSocket, WebSocketServer } from "ws";
 import { runAgent, type AgentTool } from "../agent/claude.js";
-import { recentSmsContext, taskBrief, userDetails } from "../agent/context.js";
+import { recentChatContext, taskBrief, userDetails } from "../agent/context.js";
 import { taskCallPrompt, USER_ASSISTANT_PROMPT, USER_VOICE_ADDENDUM } from "../agent/prompts.js";
 import { taskCallTools, userTools, type CallControls } from "../agent/tools.js";
 import { config } from "../config.js";
@@ -63,7 +63,7 @@ class RelayCall {
       this.system = `${USER_ASSISTANT_PROMPT}\n\n${USER_VOICE_ADDENDUM}`;
       this.systemDetails = await userDetails(user);
       this.tools = userTools(user, s.conversationId, this.controls);
-      this.messages.push({ role: "user", content: await recentSmsContext(user) });
+      this.messages.push({ role: "user", content: await recentChatContext(user) });
     } else {
       const task = await getTask(s.taskId);
       if (!task) throw new Error(`Task ${s.taskId} missing`);

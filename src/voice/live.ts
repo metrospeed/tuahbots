@@ -7,7 +7,7 @@ import type { ServerEvent, SessionConfig } from "openai/resources/live/live";
 import { LiveWS } from "openai/resources/live/ws";
 import { WebSocket, WebSocketServer } from "ws";
 import { runAgent, type AgentTool } from "../agent/claude.js";
-import { recentSmsContext, taskBrief, userDetails } from "../agent/context.js";
+import { recentChatContext, taskBrief, userDetails } from "../agent/context.js";
 import {
   LIVE_BACKEND_ADDENDUM,
   liveTaskInstructions,
@@ -28,7 +28,7 @@ import { finalizeCall } from "./summary.js";
  * audio here; we forward it to a GPT-Live session in the same format and play
  * its speech back. GPT-Live handles the conversation itself and delegates
  * tasks (placing calls, pressing keys, hanging up) to us, which Claude
- * carries out with the same tools the SMS agent uses.
+ * carries out with the same tools the chat agent uses.
  */
 export const streamServer = new WebSocketServer({ noServer: true });
 const openai = config.voice.engine === "gpt-live" ? new OpenAI() : undefined;
@@ -273,7 +273,7 @@ class LiveCall {
       this.backendSystem = `${USER_ASSISTANT_PROMPT}\n\n${LIVE_BACKEND_ADDENDUM}`;
       this.backendDetails = await userDetails(this.user!);
       this.backendTools = userTools(this.user!, s.conversationId, this.controls);
-      this.backendPreamble = await recentSmsContext(this.user!);
+      this.backendPreamble = await recentChatContext(this.user!);
     } else {
       const task = (await getTask(s.taskId))!;
       this.backendSystem = `${taskCallPrompt()}\n\n${LIVE_BACKEND_ADDENDUM}`;

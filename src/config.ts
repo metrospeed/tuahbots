@@ -55,10 +55,10 @@ export const config = {
     // Name the assistant introduces itself with.
     name: optional("AGENT_NAME", "Tuah"),
     defaultCountry: optional("DEFAULT_COUNTRY", "US"),
-    // Comma-separated ISO country codes outbound calls/texts may reach.
+    // Comma-separated ISO country codes outbound calls may reach.
     allowedCountries: optional("ALLOWED_COUNTRIES", "US,CA").split(",").map((c) => c.trim().toUpperCase()),
     maxOutboundPerUserPerDay: Number(optional("MAX_OUTBOUND_PER_USER_PER_DAY", "20")),
-    // Outbound calls/texts to third parties only happen inside this local-time window.
+    // Outbound calls to third parties only happen inside this local-time window.
     contactHoursStart: Number(optional("CONTACT_HOURS_START", "8")),
     contactHoursEnd: Number(optional("CONTACT_HOURS_END", "21")),
     timezone: optional("TIMEZONE", "America/New_York"),

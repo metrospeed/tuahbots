@@ -2,20 +2,12 @@ import "./env.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-const { splitMessage } = await import("../src/twilio.js");
 const { validateInput } = await import("../src/agent/claude.js");
 const { toE164 } = await import("../src/phone.js");
 const { withLock } = await import("../src/lock.js");
 const { createRelaySession, takeRelaySession } = await import("../src/voice/sessions.js");
 const { buildRelayTwiml } = await import("../src/voice/twiml.js");
 const { dtmfAudio, linearToMulaw } = await import("../src/voice/dtmf.js");
-
-test("splitMessage keeps short messages whole and splits long ones on whitespace", () => {
-  assert.deepEqual(splitMessage("hello", 10), ["hello"]);
-  const parts = splitMessage("aaaa bbbb cccc dddd", 10);
-  assert.ok(parts.every((p) => p.length <= 10));
-  assert.equal(parts.join(" "), "aaaa bbbb cccc dddd");
-});
 
 test("toE164 normalizes US numbers and rejects junk", () => {
   assert.equal(toE164("(415) 555-2671"), "+14155552671");

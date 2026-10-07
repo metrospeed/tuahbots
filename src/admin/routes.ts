@@ -2,7 +2,7 @@ import express from "express";
 import { config } from "../config.js";
 import { listMessages, pool, query, queryOne, type Attachment, type Conversation, type Task, type User } from "../db/index.js";
 import { formatPhone, toE164 } from "../phone.js";
-import { notifyUser } from "../tasks.js";
+import { issueInviteLink } from "../web/auth.js";
 import { fetchRecording } from "../twilio.js";
 import {
   checkPassword,
@@ -39,11 +39,12 @@ adminRouter.use("/admin", requireAdmin);
 adminRouter.get("/admin", (_req, res) => res.redirect("/admin/conversations"));
 
 const KIND_LABELS: Record<string, string> = {
+  user_web: "Web chat",
   user_sms: "User texts",
   user_call: "User call",
   task_call: "Task call",
   task_sms: "Task texts",
-  unknown_sms: "Unknown texts",
+  unknown_sms: "Inbound texts",
   unknown_call: "Unknown call",
 };
 
@@ -230,10 +231,13 @@ adminRouter.get("/admin/users", async (req, res) => {
   const error = typeof req.query.error === "string" ? req.query.error : "";
   const rows = users
     .map(
-      (u) => `<tr><td>${esc(u.name)}</td><td>${esc(formatPhone(u.phone))}</td>
-      <td><form method="post" action="/admin/users/${u.id}/notes" class="row"><textarea name="notes" rows="2" cols="34" placeholder="Background the agent should know">${esc(u.notes)}</textarea><button>Save</button></form></td>
+      (u) => `<tr><td>${esc(u.name)}</td>
+      <td><form method="post" action="/admin/users/${u.id}/details" class="row">
+        <input name="phone" value="${esc(u.phone ? formatPhone(u.phone) : "")}" placeholder="Phone (optional)" size="14">
+        <textarea name="notes" rows="2" cols="30" placeholder="Background the agent should know">${esc(u.notes)}</textarea><button>Save</button></form></td>
       <td class="${u.active ? "ok" : "bad"}">${u.active ? "Active" : "Disabled"}</td>
-      <td><form class="inline" method="post" action="/admin/users/${u.id}/toggle"><button>${u.active ? "Disable" : "Enable"}</button></form>
+      <td><form class="inline" method="post" action="/admin/users/${u.id}/link" onsubmit="return confirm('Make a new invite link for ${esc(u.name)}? Their old link stops working and they are signed out everywhere.')"><button>New invite link</button></form>
+      <form class="inline" method="post" action="/admin/users/${u.id}/toggle"><button>${u.active ? "Disable" : "Enable"}</button></form>
       <form class="inline" method="post" action="/admin/users/${u.id}/delete" onsubmit="return confirm('Delete ${esc(u.name)}? Their tasks are deleted too; transcripts are kept.')"><button>Delete</button></form></td></tr>`,
     )
     .join("");
@@ -244,47 +248,69 @@ adminRouter.get("/admin/users", async (req, res) => {
        ${error ? `<p class="bad">${esc(error)}</p>` : ""}
        <form class="row" method="post" action="/admin/users">
         <label>Name<input name="name" required></label>
-        <label>Phone<input name="phone" required placeholder="(555) 123-4567"></label>
-        <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="welcome" value="1" checked> Send welcome text</label>
-        <button class="primary">Invite</button></form>
-       <p class="small muted">Only invited, active users can text or call ${esc(formatPhone(config.twilio.phoneNumber))} and ask the agent to contact others.</p></div>
-       <div class="card">${users.length ? `<table><tr><th>Name</th><th>Phone</th><th>Notes for the agent</th><th>Status</th><th></th></tr>${rows}</table>` : `<p class="muted">Nobody invited yet.</p>`}</div>`,
+        <label>Phone (optional)<input name="phone" placeholder="(555) 123-4567"></label>
+        <button class="primary">Create invite link</button></form>
+       <p class="small muted">Invited people use the agent from a private web page; you'll get a link to send them however you like.
+       If you add their phone number, they can also call ${esc(formatPhone(config.twilio.phoneNumber))} to talk to the agent.</p></div>
+       <div class="card">${users.length ? `<table><tr><th>Name</th><th>Phone and notes for the agent</th><th>Status</th><th></th></tr>${rows}</table>` : `<p class="muted">Nobody invited yet.</p>`}</div>`,
       "/admin/users",
     ),
   );
 });
 
+function inviteLinkPage(user: User, link: string): string {
+  return layout(
+    "Invite link",
+    `<div class="card"><h3>Invite link for ${esc(user.name)}</h3>
+     <p>Send this link to ${esc(user.name)}. Opening it signs them in on that device. It's shown only once; anyone with it can use the agent as them, so send it privately.</p>
+     <div class="row"><input id="link" value="${esc(link)}" readonly style="flex:1;min-width:260px">
+     <button class="primary" onclick="navigator.clipboard.writeText(document.getElementById('link').value);this.textContent='Copied'">Copy</button></div>
+     <p><a href="/admin/users">← Back to invited users</a></p></div>`,
+    "/admin/users",
+  );
+}
+
+/** Empty input clears the phone; anything else must be a valid number. */
+function parseOptionalPhone(raw: unknown): { phone: string | null; error?: string } {
+  const text = String(raw ?? "").trim();
+  if (!text) return { phone: null };
+  const phone = toE164(text);
+  return phone ? { phone } : { phone: null, error: "That phone number isn't valid." };
+}
+
 adminRouter.post("/admin/users", async (req, res) => {
   const name = String(req.body.name ?? "").trim();
-  const phone = toE164(String(req.body.phone ?? ""));
-  if (!name || !phone) return res.redirect(`/admin/users?error=${encodeURIComponent("Enter a name and a valid phone number.")}`);
-  const user = await queryOne<User>(
-    "INSERT INTO users (name, phone) VALUES ($1, $2) ON CONFLICT (phone) DO NOTHING RETURNING *",
-    [name, phone],
-  );
-  if (!user) return res.redirect(`/admin/users?error=${encodeURIComponent("That number is already invited.")}`);
-  await pool.query("DELETE FROM blocked_numbers WHERE phone = $1", [phone]);
-  if (req.body.welcome) {
-    try {
-      await notifyUser(
-        user,
-        `Hi ${name.split(" ")[0]}, you've been invited to use ${config.agent.name}, an AI assistant. Text or call this number and ask me to call or text someone for you, e.g. "Call 555-123-4567 and get the status of the quote I just sent you." Calls are recorded. Reply STOP to opt out.`,
-      );
-    } catch (err) {
-      console.error("Welcome text failed", err);
-      return res.redirect(`/admin/users?error=${encodeURIComponent(`Invited, but the welcome text failed: ${(err as Error).message}`)}`);
-    }
-  }
-  res.redirect("/admin/users");
+  const { phone, error } = parseOptionalPhone(req.body.phone);
+  if (!name || error) return res.redirect(`/admin/users?error=${encodeURIComponent(error ?? "Enter a name.")}`);
+  const user = await queryOne<User>("INSERT INTO users (name, phone) VALUES ($1, $2) ON CONFLICT (phone) DO NOTHING RETURNING *", [name, phone]);
+  if (!user) return res.redirect(`/admin/users?error=${encodeURIComponent("Someone with that phone number is already invited.")}`);
+  res.send(inviteLinkPage(user, await issueInviteLink(user.id)));
+});
+
+adminRouter.post("/admin/users/:id/link", async (req, res) => {
+  const user = await queryOne<User>("SELECT * FROM users WHERE id = $1", [Number(req.params.id)]);
+  if (!user) return res.redirect("/admin/users");
+  res.send(inviteLinkPage(user, await issueInviteLink(user.id)));
 });
 
 adminRouter.post("/admin/users/:id/toggle", async (req, res) => {
-  await pool.query("UPDATE users SET active = NOT active WHERE id = $1", [Number(req.params.id)]);
+  // Disabling also signs them out of every device.
+  await pool.query("UPDATE users SET active = NOT active, session_version = session_version + 1 WHERE id = $1", [Number(req.params.id)]);
   res.redirect("/admin/users");
 });
 
-adminRouter.post("/admin/users/:id/notes", async (req, res) => {
-  await pool.query("UPDATE users SET notes = $2 WHERE id = $1", [Number(req.params.id), String(req.body.notes ?? "").slice(0, 4000)]);
+adminRouter.post("/admin/users/:id/details", async (req, res) => {
+  const { phone, error } = parseOptionalPhone(req.body.phone);
+  if (error) return res.redirect(`/admin/users?error=${encodeURIComponent(error)}`);
+  try {
+    await pool.query("UPDATE users SET phone = $2, notes = $3 WHERE id = $1", [
+      Number(req.params.id),
+      phone,
+      String(req.body.notes ?? "").slice(0, 4000),
+    ]);
+  } catch {
+    return res.redirect(`/admin/users?error=${encodeURIComponent("Someone else already has that phone number.")}`);
+  }
   res.redirect("/admin/users");
 });
 
@@ -300,7 +326,7 @@ adminRouter.get("/admin/blocked", async (_req, res) => {
   res.send(
     layout(
       "Blocked numbers",
-      `<div class="card"><h3>Block a number</h3><p class="small muted">The agent will never call or text a blocked number. People who reply STOP are added automatically.</p>
+      `<div class="card"><h3>Block a number</h3><p class="small muted">The agent will never call a blocked number, and calls from it are not answered by the agent.</p>
        <form class="row" method="post" action="/admin/blocked">
         <label>Phone<input name="phone" required></label><label>Reason<input name="reason"></label><button class="primary">Block</button></form></div>
        <div class="card">${

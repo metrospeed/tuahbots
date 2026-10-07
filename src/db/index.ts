@@ -25,9 +25,11 @@ export async function migrate(): Promise<void> {
 export interface User {
   id: number;
   name: string;
-  phone: string;
+  phone: string | null;
   notes: string;
   active: boolean;
+  login_token_hash: string | null;
+  session_version: number;
   created_at: Date;
 }
 
@@ -45,7 +47,7 @@ export interface Task {
   completed_at: Date | null;
 }
 
-export type ConversationKind = "user_sms" | "user_call" | "task_call" | "task_sms" | "unknown_sms" | "unknown_call";
+export type ConversationKind = "user_web" | "user_call" | "task_call" | "unknown_sms" | "unknown_call" | "user_sms" | "task_sms";
 
 export interface Conversation {
   id: number;

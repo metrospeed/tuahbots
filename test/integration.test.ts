@@ -100,7 +100,8 @@ test("invited users get a recorded-call disclosure and a relay session", { skip:
     headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
     body: new URLSearchParams({ name: "Pat Example", phone: "(415) 555-2671" }),
   });
-  assert.equal(invite.status, 302);
+  assert.equal(invite.status, 200);
+  assert.match(await invite.text(), /https:\/\/agent\.test\/join\//);
   const users = await (await fetch(`${base}/admin/users`, { headers: { Cookie: cookie } })).text();
   assert.match(users, /Pat Example/);
 
@@ -183,4 +184,66 @@ test("texts from unknown numbers are stored without replying", { skip: !enabled 
   await new Promise((r) => setTimeout(r, 200));
   const rows = await db.query("SELECT m.body FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.kind = 'unknown_sms'");
   assert.equal(rows[0].body, "hello?");
+});
+
+test("invited users chat on the web via their invite link", { skip: !enabled }, async () => {
+  const cookie = await login();
+  const invite = await fetch(`${base}/admin/users`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    body: new URLSearchParams({ name: "Web Only", phone: "" }),
+  });
+  const link = /https:\/\/agent\.test(\/join\/[A-Za-z0-9_-]+)/.exec(await invite.text())![1];
+
+  // Not signed in yet; a forged link doesn't work.
+  assert.equal((await fetch(`${base}/app`)).status, 401);
+  assert.equal((await fetch(`${base}/join/forged`)).status, 404);
+
+  const join = await fetch(base + link, { redirect: "manual" });
+  assert.equal(join.status, 302);
+  assert.equal(join.headers.get("location"), "/app");
+  const userCookie = join.headers.get("set-cookie")!.split(";")[0];
+
+  const page = await fetch(`${base}/app`, { headers: { Cookie: userCookie } });
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /Web Only/);
+
+  // Uploads are restricted to photos, PDFs and text.
+  const bad = await fetch(`${base}/app/api/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: userCookie },
+    body: JSON.stringify({ text: "hi", files: [{ type: "text/html", data: Buffer.from("<b>x</b>").toString("base64") }] }),
+  });
+  assert.equal(bad.status, 400);
+
+  const pdf = Buffer.from("%PDF-1.4 quote").toString("base64");
+  const sent = await fetch(`${base}/app/api/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: userCookie },
+    body: JSON.stringify({ text: "Call Acme about this quote", files: [{ type: "application/pdf", data: pdf }] }),
+  });
+  assert.equal(sent.status, 200);
+
+  // Claude is unreachable in tests, so the agent answers with an apology.
+  let state: any;
+  for (let i = 0; i < 100; i++) {
+    state = await (await fetch(`${base}/app/api/state`, { headers: { Cookie: userCookie } })).json();
+    if (!state.busy && state.messages.length >= 2) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.equal(state.messages[0].role, "user");
+  assert.equal(state.messages[0].body, "Call Acme about this quote");
+  assert.equal(state.messages[0].files[0].type, "application/pdf");
+  assert.equal(state.messages[1].role, "assistant");
+  assert.match(state.messages[1].body, /something went wrong/);
+
+  // Their file is theirs alone.
+  const fileId = state.messages[0].files[0].id;
+  assert.equal((await fetch(`${base}/app/files/${fileId}`, { headers: { Cookie: userCookie } })).status, 200);
+
+  // A new invite link signs the old session out.
+  const userId = (await db.query("SELECT id FROM users WHERE name = 'Web Only'"))[0].id;
+  await fetch(`${base}/admin/users/${userId}/link`, { method: "POST", headers: { Cookie: cookie } });
+  assert.equal((await fetch(`${base}/app/api/state`, { headers: { Cookie: userCookie } })).status, 401);
+  assert.equal((await fetch(base + link, { redirect: "manual" })).status, 404);
 });

@@ -2,7 +2,7 @@ import type { BetaContentBlockParam, BetaMessageParam } from "@anthropic-ai/sdk/
 import { config } from "../config.js";
 import { listMessages, query, type Attachment, type Message, type Task, type User } from "../db/index.js";
 import { formatPhone } from "../phone.js";
-import { describeTask, recentTasks, userSmsConversation } from "../tasks.js";
+import { describeTask, recentTasks, userChatConversation } from "../tasks.js";
 
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 /** Only the most recent files are sent to the model, to bound cost. */
@@ -21,7 +21,7 @@ export async function userDetails(user: User): Promise<string> {
   const tasks = await recentTasks(user.id, 5);
   return [
     nowLine(),
-    `You are talking with ${user.name} (${formatPhone(user.phone)}).`,
+    `You are talking with ${user.name}${user.phone ? ` (${formatPhone(user.phone)})` : ""}.`,
     user.notes ? `Notes about this user from the administrator: ${user.notes}` : "",
     tasks.length ? `Their most recent tasks:\n${tasks.map(describeTask).join("\n\n")}` : "They have no tasks yet.",
   ]
@@ -100,9 +100,9 @@ export async function historyFromTranscript(
   return messages;
 }
 
-/** A calling user's recent text thread and files (e.g. a quote they sent), as Claude content. */
-export async function recentSmsContext(user: User): Promise<BetaContentBlockParam[]> {
-  const thread = await userSmsConversation(user);
+/** A calling user's recent web chat and files (e.g. a quote they uploaded), as Claude content. */
+export async function recentChatContext(user: User): Promise<BetaContentBlockParam[]> {
+  const thread = await userChatConversation(user);
   const recent = (await listMessages(thread.id, 20)).filter((m) => m.role !== "event");
   const blocks: BetaContentBlockParam[] = [];
   const files = await query<Attachment>(
@@ -111,13 +111,13 @@ export async function recentSmsContext(user: User): Promise<BetaContentBlockPara
     [thread.id],
   );
   if (files.length) {
-    blocks.push({ type: "text", text: "[Files the user recently texted you:]" });
+    blocks.push({ type: "text", text: "[Files the user recently uploaded in the chat:]" });
     blocks.push(...files.map(attachmentBlock));
   }
   const transcript = recent.map((m) => `${m.role === "assistant" ? "You" : "User"}: ${m.body}`).join("\n");
   blocks.push({
     type: "text",
-    text: `${transcript ? `[Your recent text messages with the user:]\n${transcript}\n\n` : ""}[The user is now calling you.]`,
+    text: `${transcript ? `[Your recent chat messages with the user:]\n${transcript}\n\n` : ""}[The user is now calling you.]`,
   });
   return blocks;
 }

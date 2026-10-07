@@ -1,0 +1,120 @@
+import express from "express";
+import { fmtDate } from "../admin/views.js";
+import { listMessages, query, queryOne, type Attachment, type Conversation, type Task } from "../db/index.js";
+import { formatPhone } from "../phone.js";
+import { recentTasks, userChatConversation } from "../tasks.js";
+import { fetchRecording } from "../twilio.js";
+import { clearUserCookie, requireUser, setUserCookie, userForInviteToken } from "./auth.js";
+import { ALLOWED_UPLOAD_TYPES, isBusy, MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE, postUserMessage, type Upload } from "./chat.js";
+import { callPage, chatPage, simplePage } from "./pages.js";
+
+export const webRouter = express.Router();
+
+webRouter.get("/join/:token", async (req, res) => {
+  const user = await userForInviteToken(req.params.token);
+  if (!user) {
+    res.status(404).send(simplePage("Link not valid", "This invite link is invalid or has been replaced. Ask for a new one."));
+    return;
+  }
+  setUserCookie(res, user);
+  res.redirect("/app");
+});
+
+webRouter.use("/app", requireUser);
+webRouter.use("/app/api", express.json({ limit: "45mb" }));
+
+webRouter.get("/app", (req, res) => res.send(chatPage(req.user!)));
+
+webRouter.post("/app/logout", (_req, res) => {
+  clearUserCookie(res);
+  res.redirect("/app");
+});
+
+/** Chat messages after `after`, the user's recent calls, and whether a reply is pending. */
+webRouter.get("/app/api/state", async (req, res) => {
+  const user = req.user!;
+  const after = Number(req.query.after ?? 0) || 0;
+  const conversation = await userChatConversation(user);
+  const messages = await query<{ id: number; role: string; body: string; created_at: Date }>(
+    `SELECT id, role, body, created_at FROM messages
+     WHERE conversation_id = $1 AND id > $2 AND role IN ('user', 'assistant') ORDER BY id LIMIT 200`,
+    [conversation.id, after],
+  );
+  const files = await query<{ id: number; message_id: number; content_type: string }>(
+    "SELECT id, message_id, content_type FROM attachments WHERE message_id = ANY($1)",
+    [messages.map((m) => m.id)],
+  );
+  const tasks = await recentTasks(user.id, 15);
+  res.json({
+    busy: isBusy(user.id),
+    messages: messages.map((m) => ({
+      ...m,
+      time: fmtDate(m.created_at),
+      files: files.filter((f) => f.message_id === m.id).map((f) => ({ id: f.id, type: f.content_type })),
+    })),
+    tasks: tasks.map((t) => ({
+      id: t.id,
+      who: t.target_name || formatPhone(t.target_phone),
+      status: t.status,
+      objective: t.objective,
+      time: fmtDate(t.created_at),
+    })),
+  });
+});
+
+webRouter.post("/app/api/messages", async (req, res) => {
+  const text = String(req.body?.text ?? "").trim().slice(0, 8000);
+  const rawFiles: unknown[] = Array.isArray(req.body?.files) ? req.body.files : [];
+  if (!text && !rawFiles.length) return void res.status(400).json({ error: "Type a message or attach a file." });
+  if (rawFiles.length > MAX_UPLOADS_PER_MESSAGE) {
+    return void res.status(400).json({ error: `Attach at most ${MAX_UPLOADS_PER_MESSAGE} files at a time.` });
+  }
+  const uploads: Upload[] = [];
+  for (const f of rawFiles as Array<{ type?: unknown; data?: unknown }>) {
+    const contentType = String(f?.type ?? "");
+    if (!ALLOWED_UPLOAD_TYPES.has(contentType)) {
+      return void res.status(400).json({ error: "Only photos (JPEG, PNG, GIF, WebP), PDFs and text files can be attached." });
+    }
+    const data = Buffer.from(String(f?.data ?? ""), "base64");
+    if (!data.length || data.length > MAX_UPLOAD_BYTES) return void res.status(400).json({ error: "Each file must be under 10 MB." });
+    uploads.push({ contentType, data });
+  }
+  await postUserMessage(req.user!, text, uploads);
+  res.json({ ok: true });
+});
+
+const INLINE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"]);
+
+webRouter.get("/app/files/:id", async (req, res) => {
+  const file = await queryOne<Attachment>(
+    `SELECT a.* FROM attachments a JOIN messages m ON m.id = a.message_id JOIN conversations c ON c.id = m.conversation_id
+     WHERE a.id = $1 AND c.user_id = $2 AND c.kind = 'user_web'`,
+    [Number(req.params.id), req.user!.id],
+  );
+  if (!file) return void res.sendStatus(404);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Content-Security-Policy", "sandbox");
+  res.type(INLINE_TYPES.has(file.content_type) ? file.content_type : "text/plain");
+  res.send(file.data);
+});
+
+/** Transcript and recording of the calls made for one of the user's tasks. */
+webRouter.get("/app/tasks/:id", async (req, res) => {
+  const task = await queryOne<Task>("SELECT * FROM tasks WHERE id = $1 AND user_id = $2", [Number(req.params.id), req.user!.id]);
+  if (!task) return void res.status(404).send(simplePage("Not found", "That call doesn't exist."));
+  const calls = await query<Conversation>("SELECT * FROM conversations WHERE task_id = $1 ORDER BY id", [task.id]);
+  const transcripts = await Promise.all(calls.map(async (c) => ({ call: c, lines: await listMessages(c.id) })));
+  res.send(callPage(task, transcripts));
+});
+
+webRouter.get("/app/recordings/:id.mp3", async (req, res) => {
+  const call = await queryOne<Conversation>(
+    "SELECT c.* FROM conversations c JOIN tasks t ON t.id = c.task_id WHERE c.id = $1 AND t.user_id = $2",
+    [Number(req.params.id), req.user!.id],
+  );
+  if (!call?.recording_sid) return void res.sendStatus(404);
+  const upstream = await fetchRecording(call.recording_sid);
+  if (!upstream.ok) return void res.sendStatus(502);
+  res.type("audio/mpeg").send(Buffer.from(await upstream.arrayBuffer()));
+});
+

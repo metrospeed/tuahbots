@@ -3,11 +3,16 @@
 CREATE TABLE IF NOT EXISTS users (
   id          SERIAL PRIMARY KEY,
   name        TEXT NOT NULL,
-  phone       TEXT NOT NULL UNIQUE,          -- E.164
+  phone       TEXT UNIQUE,                   -- E.164; optional, lets them call the agent
   notes       TEXT NOT NULL DEFAULT '',      -- shared with the agent as background about this user
   active      BOOLEAN NOT NULL DEFAULT TRUE,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE users ALTER COLUMN phone DROP NOT NULL;
+-- Invite links: we keep only a hash of the token. Bumping session_version
+-- signs the user out everywhere (new link, disabled user).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS login_token_hash TEXT UNIQUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 1;
 
 CREATE TABLE IF NOT EXISTS blocked_numbers (
   phone       TEXT PRIMARY KEY,
@@ -33,11 +38,13 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS tasks_target_idx ON tasks (target_phone, created_at DESC);
 CREATE INDEX IF NOT EXISTS tasks_user_idx ON tasks (user_id, created_at DESC);
 
--- A single thread of communication: an invited user's SMS thread, a call with
--- an invited user, or a call/SMS thread with a third party for a task.
+-- A single thread of communication: an invited user's web chat, a call with
+-- an invited user, a call with a third party for a task, or an inbound text
+-- or call from an unknown number. (user_sms/task_sms are from an earlier
+-- version that texted; nothing creates them now.)
 CREATE TABLE IF NOT EXISTS conversations (
   id                SERIAL PRIMARY KEY,
-  kind              TEXT NOT NULL CHECK (kind IN ('user_sms', 'user_call', 'task_call', 'task_sms', 'unknown_sms', 'unknown_call')),
+  kind              TEXT NOT NULL,
   user_id           INTEGER REFERENCES users(id) ON DELETE SET NULL,
   task_id           INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
   counterpart_phone TEXT NOT NULL,
@@ -51,6 +58,9 @@ CREATE TABLE IF NOT EXISTS conversations (
   ended_at          TIMESTAMPTZ,
   last_activity_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE conversations DROP CONSTRAINT IF EXISTS conversations_kind_check;
+ALTER TABLE conversations ADD CONSTRAINT conversations_kind_check
+  CHECK (kind IN ('user_web', 'user_call', 'task_call', 'unknown_sms', 'unknown_call', 'user_sms', 'task_sms'));
 CREATE INDEX IF NOT EXISTS conversations_activity_idx ON conversations (last_activity_at DESC);
 CREATE INDEX IF NOT EXISTS conversations_user_idx ON conversations (user_id, kind, last_activity_at DESC);
 CREATE INDEX IF NOT EXISTS conversations_task_idx ON conversations (task_id);
@@ -67,7 +77,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages (conversation_id, id);
 
--- Media (photos, PDFs) users send by MMS, e.g. a quote to discuss.
+-- Files (photos, PDFs) users upload in the chat, e.g. a quote to discuss.
 CREATE TABLE IF NOT EXISTS attachments (
   id            SERIAL PRIMARY KEY,
   message_id    INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,

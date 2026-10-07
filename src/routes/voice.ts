@@ -11,12 +11,11 @@ import {
   type Conversation,
 } from "../db/index.js";
 import { toE164 } from "../phone.js";
-import { finishTask } from "../tasks.js";
+import { finishTask, latestTaskForNumber } from "../tasks.js";
 import { requireTwilioSignature } from "../twilio.js";
 import { createRelaySession } from "../voice/sessions.js";
 import { finalizeCall } from "../voice/summary.js";
 import { buildCallTwiml, sayAndHangup } from "../voice/twiml.js";
-import { latestTaskForNumber } from "./sms.js";
 
 export const voiceRouter = express.Router();
 

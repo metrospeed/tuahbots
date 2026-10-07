@@ -11,7 +11,7 @@ import {
   type User,
 } from "./db/index.js";
 import { countryOf, formatPhone, toE164 } from "./phone.js";
-import { sendSms, twilioClient } from "./twilio.js";
+import { twilioClient } from "./twilio.js";
 import { createRelaySession } from "./voice/sessions.js";
 import { buildCallTwiml } from "./voice/twiml.js";
 
@@ -54,7 +54,7 @@ function isEmergencyOrShortCode(e164: string): boolean {
 }
 
 async function createTask(user: User, t: {
-  kind: "call" | "sms";
+  kind: "call";
   phone: string;
   targetName: string;
   objective: string;
@@ -116,28 +116,7 @@ export async function placeTaskCall(task: Task, user: User): Promise<void> {
   }
 }
 
-export async function startSmsTask(user: User, input: {
-  phone: string;
-  recipientName: string;
-  message: string;
-  objective: string;
-  context: string;
-}): Promise<Task> {
-  const phone = await checkOutboundAllowed(user, input.phone);
-  const task = await createTask(user, { kind: "sms", phone, targetName: input.recipientName, objective: input.objective, context: input.context });
-  const conversation = await createConversation({ kind: "task_sms", userId: user.id, taskId: task.id, counterpartPhone: phone, direction: "outbound" });
-  const body = `${input.message.trim()}\n\n- ${config.agent.name}, an AI assistant texting for ${user.name}. Reply STOP to opt out.`;
-  try {
-    const sids = await sendSms(phone, body);
-    await addMessage(conversation.id, "assistant", body, sids[0]);
-  } catch (err) {
-    await finishTask(task.id, "failed", `The text could not be sent: ${(err as Error).message}`);
-    throw new TaskError(`The text could not be sent: ${(err as Error).message}`);
-  }
-  return task;
-}
-
-/** Mark a task finished and text the requester the result (once). */
+/** Mark a task finished and post the result to the requester's chat (once). */
 export async function finishTask(taskId: number, status: "completed" | "failed" | "cancelled", result: string): Promise<void> {
   const task = await queryOne<Task>(
     `UPDATE tasks SET status = $2, result = $3, completed_at = now()
@@ -148,23 +127,34 @@ export async function finishTask(taskId: number, status: "completed" | "failed" 
   const user = await getUser(task.user_id);
   if (!user?.active) return;
   const who = task.target_name || formatPhone(task.target_phone);
-  const verb = task.kind === "call" ? "Call with" : "Texts with";
-  await notifyUser(user, `${verb} ${who} (task #${task.id}) ${status === "completed" ? "done" : "failed"}:\n${result}`);
+  await notifyUser(user, `Call with ${who} (task #${task.id}) ${status === "completed" ? "done" : "failed"}:\n${result}`);
 }
 
-/** Text an invited user and record it in their SMS thread so the agent remembers it. */
+/** Post a message from the agent into a user's web chat. */
 export async function notifyUser(user: User, body: string): Promise<void> {
-  const conversation = await userSmsConversation(user);
-  const sids = await sendSms(user.phone, body);
-  await addMessage(conversation.id, "assistant", body, sids[0]);
+  const conversation = await userChatConversation(user);
+  await addMessage(conversation.id, "assistant", body);
 }
 
-export async function userSmsConversation(user: User): Promise<Conversation> {
+/** Each invited user has one long-running web chat thread with the agent. */
+export async function userChatConversation(user: User): Promise<Conversation> {
   const existing = await queryOne<Conversation>(
-    "SELECT * FROM conversations WHERE kind = 'user_sms' AND user_id = $1 ORDER BY id DESC LIMIT 1",
+    "SELECT * FROM conversations WHERE kind = 'user_web' AND user_id = $1 ORDER BY id DESC LIMIT 1",
     [user.id],
   );
-  return existing ?? createConversation({ kind: "user_sms", userId: user.id, counterpartPhone: user.phone, direction: "inbound" });
+  return existing ?? createConversation({ kind: "user_web", userId: user.id, counterpartPhone: user.phone ?? "", direction: "inbound" });
+}
+
+/** How long after a task the person we called can still call back about it. */
+const TASK_CALLBACK_WINDOW = "30 days";
+
+export async function latestTaskForNumber(phone: string): Promise<Task | undefined> {
+  return queryOne<Task>(
+    `SELECT * FROM tasks WHERE target_phone = $1 AND status <> 'cancelled'
+       AND created_at > now() - interval '${TASK_CALLBACK_WINDOW}'
+     ORDER BY id DESC LIMIT 1`,
+    [phone],
+  );
 }
 
 export async function recentTasks(userId: number, limit = 10): Promise<Task[]> {

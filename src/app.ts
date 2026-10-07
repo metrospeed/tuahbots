@@ -6,6 +6,7 @@ import { smsRouter } from "./routes/sms.js";
 import { voiceRouter } from "./routes/voice.js";
 import { handleStreamUpgrade } from "./voice/live.js";
 import { handleRelayUpgrade } from "./voice/relay.js";
+import { webRouter } from "./web/routes.js";
 
 export function createServer(): http.Server {
   const app = express();
@@ -14,10 +15,11 @@ export function createServer(): http.Server {
   app.use(express.urlencoded({ extended: false, limit: "1mb" }));
 
   app.get("/healthz", (_req, res) => res.send("ok"));
-  app.get("/", (_req, res) => res.redirect("/admin"));
+  app.get("/", (_req, res) => res.redirect("/app"));
   app.use(smsRouter);
   app.use(voiceRouter);
   app.use(adminRouter);
+  app.use(webRouter);
 
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     console.error(err);
