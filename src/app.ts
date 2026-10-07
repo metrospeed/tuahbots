@@ -2,6 +2,7 @@ import http from "node:http";
 import express from "express";
 import { adminRouter } from "./admin/routes.js";
 import { config } from "./config.js";
+import { assetsRouter, securityHeaders } from "./security.js";
 import { smsRouter } from "./routes/sms.js";
 import { voiceRouter } from "./routes/voice.js";
 import { handleStreamUpgrade } from "./voice/live.js";
@@ -12,9 +13,11 @@ export function createServer(): http.Server {
   const app = express();
   app.set("trust proxy", 1);
   app.disable("x-powered-by");
+  app.use(securityHeaders);
   app.use(express.urlencoded({ extended: false, limit: "1mb" }));
 
   app.get("/healthz", (_req, res) => res.send("ok"));
+  app.use(assetsRouter());
   app.get("/", (_req, res) => res.redirect("/app"));
   app.use(smsRouter);
   app.use(voiceRouter);

@@ -70,18 +70,75 @@ textarea.wide{width:100%}
 <header><b>${esc(config.agent.name)} admin</b>${nav}
 <form method="post" action="/admin/logout"><button>Log out</button></form></header>
 ${callsEnabled ? "" : `<div class="callsoff">Calls are turned off. The agent won't place or answer any calls. <a href="/admin/settings">Settings</a></div>`}
-<main>${body}</main></body></html>`;
+<main>${body}</main><script src="/assets/admin.js" defer></script></body></html>`;
+}
+
+function authPage(title: string, inner: string): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(title)} · ${esc(config.agent.name)} admin</title>
+<style>body{font:15px/1.45 system-ui;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px;background:#f6f7f9;color:#1d2330}
+@media (prefers-color-scheme:dark){body{background:#0f1218;color:#e6e8ec}.box{background:#171b23!important;border-color:#2a303b!important}input{background:#0f1218;color:#e6e8ec;border-color:#2a303b!important}}
+.box{width:100%;max-width:340px;background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:22px}
+h2{margin:0 0 6px}p{margin:6px 0}.muted{color:#6b7280;font-size:13px}.err{color:#b91c1c}
+form{display:flex;flex-direction:column;gap:10px;margin-top:12px}input,button{font:inherit;padding:9px;border-radius:8px;border:1px solid #ccc}
+button,.btn{background:#2563eb;color:#fff;border:0;cursor:pointer}a{color:#2563eb}
+.btn{display:block;text-align:center;text-decoration:none;padding:9px;border-radius:8px}
+.qr{background:#fff;padding:8px;border-radius:8px;width:200px;margin:8px auto}.qr svg{display:block;width:100%;height:auto}
+code{font-size:13px;word-break:break-all}.codes{font:15px ui-monospace,monospace;columns:2;margin:10px 0;padding:0;list-style:none}</style></head>
+<body><div class="box">${inner}</div></body></html>`;
 }
 
 export function loginPage(error = ""): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Admin login</title>
-<style>body{font:15px system-ui;display:grid;place-items:center;min-height:100vh;margin:0;background:#f6f7f9}
-@media (prefers-color-scheme:dark){body{background:#0f1218;color:#e6e8ec}}
-form{display:flex;flex-direction:column;gap:10px;width:280px}input,button{font:inherit;padding:8px;border-radius:6px;border:1px solid #ccc}
-button{background:#2563eb;color:#fff;border:0}</style></head>
-<body><form method="post" action="/admin/login"><h2>${esc(config.agent.name)} admin</h2>
-${error ? `<div style="color:#b91c1c">${esc(error)}</div>` : ""}
-<input type="password" name="password" placeholder="Password" autofocus required>
-<button>Log in</button></form></body></html>`;
+  return authPage(
+    "Sign in",
+    `<h2>${esc(config.agent.name)} admin</h2>
+    <form method="post" action="/admin/login">
+      ${error ? `<div class="err" role="alert">${esc(error)}</div>` : ""}
+      <input type="password" name="password" placeholder="Password" autocomplete="current-password" autofocus required>
+      <button>Continue</button>
+    </form>`,
+  );
+}
+
+export function codePage(error = ""): string {
+  return authPage(
+    "Two-factor code",
+    `<h2>Enter your code</h2>
+    <p class="muted">Open your authenticator app and enter the 6-digit code. Lost your phone? Enter one of your recovery codes instead.</p>
+    <form method="post" action="/admin/login/code">
+      ${error ? `<div class="err" role="alert">${esc(error)}</div>` : ""}
+      <input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" maxlength="20" autofocus required>
+      <button>Sign in</button>
+    </form>
+    <p class="muted"><a href="/admin/login">Start over</a></p>`,
+  );
+}
+
+/** First sign-in: scan the QR code into an authenticator app and confirm a code. */
+export function setupPage(opts: { qrSvg: string; secret: string; candidate: string; error?: string }): string {
+  const grouped = opts.secret.replace(/(.{4})/g, "$1 ").trim();
+  return authPage(
+    "Set up two-factor",
+    `<h2>Set up two-factor sign-in</h2>
+    <p class="muted">Scan this with an authenticator app (Google Authenticator, 1Password, Authy, …), then enter the 6-digit code it shows.</p>
+    <div class="qr" aria-label="QR code for your authenticator app">${opts.qrSvg}</div>
+    <p class="muted">Can't scan? Enter this key manually:<br><code>${esc(grouped)}</code></p>
+    <form method="post" action="/admin/login/setup">
+      <input type="hidden" name="candidate" value="${esc(opts.candidate)}">
+      ${opts.error ? `<div class="err" role="alert">${esc(opts.error)}</div>` : ""}
+      <input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" maxlength="6" autofocus required>
+      <button>Turn on two-factor</button>
+    </form>`,
+  );
+}
+
+export function recoveryCodesPage(codes: string[], intro: string): string {
+  return authPage(
+    "Recovery codes",
+    `<h2>Save your recovery codes</h2>
+    <p>${esc(intro)}</p>
+    <p class="muted">Each code works once, in place of an authenticator code, if you lose your phone. Store them somewhere safe (a password manager). They won't be shown again.</p>
+    <ul class="codes">${codes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>
+    <p><a class="btn" href="/admin/conversations">I've saved them, continue</a></p>`,
+  );
 }

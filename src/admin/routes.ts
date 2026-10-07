@@ -2,18 +2,30 @@ import express from "express";
 import { config } from "../config.js";
 import { listMessages, pool, query, queryOne, type Attachment, type Conversation, type Task, type User, type UserNumber } from "../db/index.js";
 import { formatPhone, toE164 } from "../phone.js";
-import { issueInviteLink } from "../web/auth.js";
+import { INVITE_DAYS, issueInviteLink, revokeInviteLink } from "../web/auth.js";
 import { setCallbackAllowed } from "../numbers.js";
 import { sendRecording } from "../recordings.js";
+import QRCode from "qrcode";
 import {
+  SESSION_MINUTES,
   checkPassword,
-  clearSessionCookie,
+  checkSecondFactor,
+  clearFailedLogins,
+  endAllSessions,
+  enrollTwoFactor,
   loginThrottled,
+  passwordStepDone,
   recordFailedLogin,
+  recoveryCodesLeft,
+  replaceRecoveryCodes,
   requireAdmin,
-  setSessionCookie,
+  resetTwoFactor,
+  startPendingLogin,
+  startSession,
+  twoFactorEnrolled,
 } from "./auth.js";
-import { esc, fmtDate, layout, loginPage, setCallsEnabledBanner } from "./views.js";
+import { decryptSecret, encryptSecret, generateRecoveryCodes, generateSecret, otpauthUri, verifyTotp } from "./totp.js";
+import { codePage, esc, fmtDate, layout, loginPage, recoveryCodesPage, setCallsEnabledBanner, setupPage } from "./views.js";
 import { DEFAULT_SETTINGS, GREETING_PLACEHOLDERS, getSettings, saveSettings, validateSettings, type Settings } from "../settings.js";
 import { twilioClient } from "../twilio.js";
 
@@ -21,19 +33,69 @@ export const adminRouter = express.Router();
 
 adminRouter.get("/admin/login", (_req, res) => res.send(loginPage()));
 
-adminRouter.post("/admin/login", (req, res) => {
+adminRouter.post("/admin/login", async (req, res) => {
   const ip = req.ip ?? "unknown";
-  if (loginThrottled(ip)) return res.status(429).send(loginPage("Too many attempts. Try again in 15 minutes."));
+  if (loginThrottled(`pw:${ip}`)) return void res.status(429).send(loginPage("Too many attempts. Try again in 15 minutes."));
   if (!checkPassword(String(req.body.password ?? ""))) {
-    recordFailedLogin(ip);
-    return res.status(401).send(loginPage("Wrong password."));
+    recordFailedLogin(`pw:${ip}`);
+    return void res.status(401).send(loginPage("Wrong password."));
   }
-  setSessionCookie(res);
-  res.redirect("/admin/conversations");
+  await startPendingLogin(res);
+  res.redirect((await twoFactorEnrolled()) ? "/admin/login/code" : "/admin/login/setup");
 });
 
-adminRouter.post("/admin/logout", (_req, res) => {
-  clearSessionCookie(res);
+adminRouter.get("/admin/login/code", async (req, res) => {
+  if (!(await passwordStepDone(req))) return void res.redirect("/admin/login");
+  if (!(await twoFactorEnrolled())) return void res.redirect("/admin/login/setup");
+  res.send(codePage());
+});
+
+adminRouter.post("/admin/login/code", async (req, res) => {
+  const ip = req.ip ?? "unknown";
+  if (!(await passwordStepDone(req))) return void res.redirect("/admin/login");
+  if (loginThrottled(`code:${ip}`)) return void res.status(429).send(codePage("Too many attempts. Try again in 15 minutes."));
+  if (!(await checkSecondFactor(String(req.body.code ?? "")))) {
+    recordFailedLogin(`code:${ip}`);
+    return void res.status(401).send(codePage("That code didn't work. Wait for a new one and try again."));
+  }
+  clearFailedLogins(`code:${ip}`);
+  await startSession(res);
+  const left = await recoveryCodesLeft();
+  res.redirect(left <= 2 ? "/admin/settings?recovery=low" : "/admin/conversations");
+});
+
+/** First sign-in (or after a reset): enroll an authenticator app. */
+adminRouter.get("/admin/login/setup", async (req, res) => {
+  if (!(await passwordStepDone(req))) return void res.redirect("/admin/login");
+  if (await twoFactorEnrolled()) return void res.redirect("/admin/login/code");
+  const secret = generateSecret();
+  res.setHeader("Cache-Control", "no-store");
+  res.send(setupPage({ qrSvg: await QRCode.toString(otpauthUri(secret), { type: "svg", margin: 1 }), secret, candidate: encryptSecret(secret) }));
+});
+
+adminRouter.post("/admin/login/setup", async (req, res) => {
+  const ip = req.ip ?? "unknown";
+  if (!(await passwordStepDone(req))) return void res.redirect("/admin/login");
+  if (await twoFactorEnrolled()) return void res.redirect("/admin/login/code");
+  // The candidate secret travels encrypted and authenticated, so it can't be swapped.
+  const secret = decryptSecret(String(req.body.candidate ?? ""));
+  if (!secret) return void res.redirect("/admin/login/setup");
+  res.setHeader("Cache-Control", "no-store");
+  if (loginThrottled(`code:${ip}`)) return void res.status(429).send(loginPage("Too many attempts. Try again in 15 minutes."));
+  const counter = verifyTotp(secret, String(req.body.code ?? ""), 0);
+  if (counter === null) {
+    recordFailedLogin(`code:${ip}`);
+    const qrSvg = await QRCode.toString(otpauthUri(secret), { type: "svg", margin: 1 });
+    return void res.status(400).send(setupPage({ qrSvg, secret, candidate: String(req.body.candidate), error: "That code didn't match. Check your phone's time is set automatically, then try the newest code." }));
+  }
+  const codes = generateRecoveryCodes();
+  await enrollTwoFactor(secret, counter, codes);
+  await startSession(res);
+  res.send(recoveryCodesPage(codes, "Two-factor sign-in is on."));
+});
+
+adminRouter.post("/admin/logout", async (_req, res) => {
+  await endAllSessions(res);
   res.redirect("/admin/login");
 });
 
@@ -236,20 +298,37 @@ adminRouter.get("/admin/users", async (req, res) => {
   const error = typeof req.query.error === "string" ? req.query.error : "";
   const rows = users
     .map(
-      (u) => `<tr><td>${esc(u.name)}<div class="small ${u.password_hash ? "muted" : "bad"}">${
-        u.password_hash ? esc(u.email ?? "") : u.login_token_hash ? "Invite not used yet" : "No login"
-      }</div></td>
+      (u) => {
+        const linkLive = !!u.login_token_hash && !!u.login_token_expires_at && u.login_token_expires_at > new Date();
+        const linkExpired = !!u.login_token_hash && !linkLive;
+        const linkKind = u.password_hash ? "Reset link" : "Invite";
+        const status = linkLive
+          ? `${linkKind} pending, expires ${esc(fmtDate(u.login_token_expires_at))}`
+          : linkExpired
+            ? `${linkKind} expired`
+            : u.password_hash
+              ? ""
+              : "No login";
+        return `<tr><td>${esc(u.name)}
+        ${u.password_hash ? `<div class="small muted">${esc(u.email ?? "")}</div>` : ""}
+        ${status ? `<div class="small ${linkLive ? "" : "bad"}">${status}</div>` : ""}</td>
       <td><form method="post" action="/admin/users/${u.id}/details" class="row">
         <input name="phone" value="${esc(u.phone ? formatPhone(u.phone) : "")}" placeholder="Phone (optional)" size="14">
         <textarea name="notes" rows="2" cols="30" placeholder="Background the agent should know">${esc(u.notes)}</textarea><button>Save</button></form></td>
       <td class="${u.active ? "ok" : "bad"}">${u.active ? "Active" : "Disabled"}</td>
-      <td><form class="inline" method="post" action="/admin/users/${u.id}/link" onsubmit="return confirm('${
+      <td><form class="inline" method="post" action="/admin/users/${u.id}/link" data-confirm="${esc(
         u.password_hash
-          ? `Make a password reset link for ${esc(u.name)}? They are signed out everywhere until they use it.`
-          : `Make a new invite link for ${esc(u.name)}? Any earlier link stops working.`
-      }')"><button>${u.password_hash ? "Reset link" : "New invite link"}</button></form>
+          ? `Make a password reset link for ${u.name}? They are signed out everywhere until they use it.`
+          : `Make a new invite link for ${u.name}? Any earlier link stops working.`,
+      )}"><button>${u.password_hash ? "Reset link" : "New invite link"}</button></form>
+      ${
+        linkLive
+          ? `<form class="inline" method="post" action="/admin/users/${u.id}/revoke-link" data-confirm="${esc(`Revoke the outstanding link for ${u.name}? It stops working immediately.`)}"><button>Revoke link</button></form>`
+          : ""
+      }
       <form class="inline" method="post" action="/admin/users/${u.id}/toggle"><button>${u.active ? "Disable" : "Enable"}</button></form>
-      <form class="inline" method="post" action="/admin/users/${u.id}/delete" onsubmit="return confirm('Delete ${esc(u.name)}? Their tasks are deleted too; transcripts are kept.')"><button>Delete</button></form></td></tr>`,
+      <form class="inline" method="post" action="/admin/users/${u.id}/delete" data-confirm="${esc(`Delete ${u.name}? Their tasks are deleted too; transcripts are kept.`)}"><button>Delete</button></form></td></tr>`;
+      },
     )
     .join("");
   res.send(
@@ -277,9 +356,10 @@ function inviteLinkPage(user: User, link: string): string {
        user.password_hash
          ? "It lets them choose a new password."
          : "It lets them create their login (email and password), then they sign in at /login."
-     } It works once and is shown only here, so send it privately: whoever opens it first gets the account.</p>
+     } It works once, expires in ${INVITE_DAYS} days, and is shown only here, so send it privately: whoever opens it first gets the account.
+     You can revoke it anytime from Invited users.</p>
      <div class="row"><input id="link" value="${esc(link)}" readonly style="flex:1;min-width:260px">
-     <button class="primary" onclick="navigator.clipboard.writeText(document.getElementById('link').value);this.textContent='Copied'">Copy</button></div>
+     <button class="primary" type="button" data-copy="#link">Copy</button></div>
      <p><a href="/admin/users">← Back to invited users</a></p></div>`,
     "/admin/users",
   );
@@ -306,6 +386,11 @@ adminRouter.post("/admin/users/:id/link", async (req, res) => {
   const user = await queryOne<User>("SELECT * FROM users WHERE id = $1", [Number(req.params.id)]);
   if (!user) return res.redirect("/admin/users");
   res.send(inviteLinkPage(user, await issueInviteLink(user.id)));
+});
+
+adminRouter.post("/admin/users/:id/revoke-link", async (req, res) => {
+  await revokeInviteLink(Number(req.params.id));
+  res.redirect("/admin/users");
 });
 
 adminRouter.post("/admin/users/:id/toggle", async (req, res) => {
@@ -384,7 +469,7 @@ const GREETING_FIELDS: Array<[keyof typeof GREETING_PLACEHOLDERS, string, string
   ["greetingCallback", "Other people calling back", "When someone the agent called calls the number back."],
 ];
 
-function settingsPage(settings: Settings, notice = "", error = ""): string {
+function settingsPage(settings: Settings, notice = "", error = "", recoveryLeft = 0): string {
   const greetings = GREETING_FIELDS.map(
     ([key, label, hint]) => `<fieldset><legend>${esc(label)}</legend>
       <textarea class="wide" name="${key}" rows="3" maxlength="600" required>${esc(settings[key])}</textarea>
@@ -394,9 +479,20 @@ function settingsPage(settings: Settings, notice = "", error = ""): string {
   return layout(
     "Settings",
     `${notice ? `<div class="card ok">${esc(notice)}</div>` : ""}${error ? `<div class="card bad">${esc(error)}</div>` : ""}
+     <div class="card"><h3>Two-factor sign-in</h3>
+      <p class="small muted">Admin sign-in needs your password and a code from your authenticator app. Sessions last ${SESSION_MINUTES} minutes; logging out ends every admin session.
+      <b>${recoveryLeft}</b> recovery code${recoveryLeft === 1 ? "" : "s"} left.</p>
+      <div class="row">
+        <form method="post" action="/admin/settings/2fa/recovery" class="row">
+          <label>Current code<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="20" required size="10"></label>
+          <button>New recovery codes</button></form>
+        <form method="post" action="/admin/settings/2fa/reset" class="row" data-confirm="Move two-factor to a new phone? You'll be signed out and set it up again at your next sign-in.">
+          <label>Current code<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="20" required size="10"></label>
+          <button>Set up on a new phone</button></form>
+      </div></div>
      <div class="card"><h3>Calls</h3>
       <form method="post" action="/admin/settings/calls" class="switch"
-        ${settings.callsEnabled ? `onsubmit="return confirm('Turn off all calls? Calls in progress will be hung up, and the agent won\\'t place or answer calls until you turn them back on.')"` : ""}>
+        ${settings.callsEnabled ? `data-confirm="Turn off all calls? Calls in progress will be hung up, and the agent won&#39;t place or answer calls until you turn them back on."` : ""}>
         <span class="state ${settings.callsEnabled ? "ok" : "bad"}">${settings.callsEnabled ? "On" : "Off"}</span>
         <input type="hidden" name="enabled" value="${settings.callsEnabled ? "0" : "1"}">
         <button class="${settings.callsEnabled ? "danger" : "primary"}">${settings.callsEnabled ? "Turn off all calls" : "Turn calls back on"}</button>
@@ -430,7 +526,34 @@ adminRouter.get("/admin/settings", async (req, res) => {
         : req.query.calls === "off"
           ? `Calls are off.${ended ? ` Ended ${ended} call${ended === 1 ? "" : "s"} in progress.` : ""}`
           : "";
-  res.send(settingsPage(await getSettings(), notice));
+  const left = await recoveryCodesLeft();
+  const warn = req.query.recovery === "low" ? `Only ${left} recovery code${left === 1 ? "" : "s"} left. Make new ones below.` : "";
+  res.send(settingsPage(await getSettings(), notice, warn, left));
+});
+
+/** New recovery codes (the old ones stop working). Needs a current code. */
+adminRouter.post("/admin/settings/2fa/recovery", async (req, res) => {
+  const ip = req.ip ?? "unknown";
+  if (loginThrottled(`code:${ip}`) || !(await checkSecondFactor(String(req.body.code ?? "")))) {
+    recordFailedLogin(`code:${ip}`);
+    return void res.status(400).send(settingsPage(await getSettings(), "", "That code didn't work.", await recoveryCodesLeft()));
+  }
+  const codes = generateRecoveryCodes();
+  await replaceRecoveryCodes(codes);
+  res.setHeader("Cache-Control", "no-store");
+  res.send(recoveryCodesPage(codes, "Your old recovery codes no longer work."));
+});
+
+/** Remove two-factor so it can be set up on a new phone at the next sign-in. Needs a current code. */
+adminRouter.post("/admin/settings/2fa/reset", async (req, res) => {
+  const ip = req.ip ?? "unknown";
+  if (loginThrottled(`code:${ip}`) || !(await checkSecondFactor(String(req.body.code ?? "")))) {
+    recordFailedLogin(`code:${ip}`);
+    return void res.status(400).send(settingsPage(await getSettings(), "", "That code didn't work.", await recoveryCodesLeft()));
+  }
+  await resetTwoFactor();
+  res.clearCookie("tuah_admin", { path: "/admin" });
+  res.redirect("/admin/login");
 });
 
 adminRouter.post("/admin/settings", async (req, res) => {
@@ -446,7 +569,7 @@ adminRouter.post("/admin/settings", async (req, res) => {
     maxCallMinutes: Number(req.body.maxCallMinutes),
   };
   const error = validateSettings(next);
-  if (error) return void res.status(400).send(settingsPage(next, "", error));
+  if (error) return void res.status(400).send(settingsPage(next, "", error, await recoveryCodesLeft()));
   const { callsEnabled: _unchanged, ...changes } = next;
   await saveSettings(changes);
   res.redirect("/admin/settings?saved=1");
