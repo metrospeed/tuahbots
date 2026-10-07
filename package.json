@@ -19,6 +19,7 @@
     "@anthropic-ai/sdk": "^0.131.0",
     "express": "^5.2.1",
     "libphonenumber-js": "^1.13.14",
+    "openai": "^7.30.0",
     "pg": "^8.23.1",
     "twilio": "^6.1.2",
     "ws": "^8.22.0"

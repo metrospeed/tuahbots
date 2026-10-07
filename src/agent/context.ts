@@ -2,7 +2,7 @@ import type { BetaContentBlockParam, BetaMessageParam } from "@anthropic-ai/sdk/
 import { config } from "../config.js";
 import { listMessages, query, type Attachment, type Message, type Task, type User } from "../db/index.js";
 import { formatPhone } from "../phone.js";
-import { describeTask, recentTasks } from "../tasks.js";
+import { describeTask, recentTasks, userSmsConversation } from "../tasks.js";
 
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 /** Only the most recent files are sent to the model, to bound cost. */
@@ -98,4 +98,26 @@ export async function historyFromTranscript(
 
   while (messages.length && messages[0].role !== "user") messages.shift();
   return messages;
+}
+
+/** A calling user's recent text thread and files (e.g. a quote they sent), as Claude content. */
+export async function recentSmsContext(user: User): Promise<BetaContentBlockParam[]> {
+  const thread = await userSmsConversation(user);
+  const recent = (await listMessages(thread.id, 20)).filter((m) => m.role !== "event");
+  const blocks: BetaContentBlockParam[] = [];
+  const files = await query<Attachment>(
+    `SELECT a.* FROM attachments a JOIN messages m ON m.id = a.message_id
+     WHERE m.conversation_id = $1 AND a.created_at > now() - interval '7 days' ORDER BY a.id DESC LIMIT 3`,
+    [thread.id],
+  );
+  if (files.length) {
+    blocks.push({ type: "text", text: "[Files the user recently texted you:]" });
+    blocks.push(...files.map(attachmentBlock));
+  }
+  const transcript = recent.map((m) => `${m.role === "assistant" ? "You" : "User"}: ${m.body}`).join("\n");
+  blocks.push({
+    type: "text",
+    text: `${transcript ? `[Your recent text messages with the user:]\n${transcript}\n\n` : ""}[The user is now calling you.]`,
+  });
+  return blocks;
 }

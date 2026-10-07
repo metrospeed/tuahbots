@@ -3,9 +3,22 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import twilio from "twilio";
-import { WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 
 const enabled = !!process.env.TEST_DATABASE_URL;
+
+// A stand-in for the GPT-Live API, so calls can be exercised end to end.
+const fakeLive = new WebSocketServer({ port: 0 });
+await new Promise((resolve) => fakeLive.once("listening", resolve));
+process.env.OPENAI_BASE_URL = `http://127.0.0.1:${(fakeLive.address() as AddressInfo).port}/v1`;
+// Claude is unreachable in tests; the call should still recover gracefully.
+process.env.ANTHROPIC_BASE_URL = "http://127.0.0.1:9";
+const liveConnections: Array<{ ws: WebSocket; path: string; received: any[] }> = [];
+fakeLive.on("connection", (ws, req) => {
+  const conn = { ws, path: req.url ?? "", received: [] as any[] };
+  liveConnections.push(conn);
+  ws.on("message", (data) => conn.received.push(JSON.parse(data.toString())));
+});
 const { createServer } = await import("../src/app.js");
 const db = await import("../src/db/index.js");
 
@@ -22,6 +35,7 @@ before(async () => {
 });
 
 after(async () => {
+  fakeLive.close();
   if (!enabled) return;
   server.close();
   await db.pool.end();
@@ -92,20 +106,72 @@ test("invited users get a recorded-call disclosure and a relay session", { skip:
 
   const res = await twilioPost("/twilio/voice", { From: "+14155552671", CallSid: "CAuser" });
   const xml = await res.text();
-  assert.match(xml, /<ConversationRelay/);
-  assert.match(xml, /this call is recorded and transcribed/);
+  // The disclosure is spoken verbatim by Twilio before GPT-Live joins.
+  assert.match(xml, /<Say[^>]*>Hi Pat, it's Tuah\. Just so you know, this call is recorded and transcribed\./);
+  assert.match(xml, /<Stream url="wss:\/\/agent\.test\/twilio\/stream">/);
+  const token = /<Parameter name="token" value="([^"]+)"/.exec(xml)![1];
 
-  // The websocket only accepts the token we minted.
-  const bad = new WebSocket(`${base.replace("http", "ws")}/twilio/relay?token=nope`);
-  await new Promise<void>((resolve) => bad.on("error", () => resolve()));
+  const streamUrl = `${base.replace("http", "ws")}/twilio/stream`;
+  const open = async () => {
+    const ws = new WebSocket(streamUrl);
+    await new Promise<void>((resolve, reject) => {
+      ws.on("open", () => resolve());
+      ws.on("error", reject);
+    });
+    return ws;
+  };
+  const start = (t: string) =>
+    JSON.stringify({ event: "start", streamSid: "MZ1", start: { streamSid: "MZ1", callSid: "CAuser", customParameters: { token: t } } });
 
-  const token = decodeURIComponent(/token=([^"&]+)/.exec(xml)![1]);
-  const ws = new WebSocket(`${base.replace("http", "ws")}/twilio/relay?token=${encodeURIComponent(token)}`);
-  await new Promise<void>((resolve, reject) => {
-    ws.on("open", () => resolve());
-    ws.on("error", reject);
-  });
-  ws.close();
+  // A forged token is refused.
+  const bad = await open();
+  const badClosed = new Promise((resolve) => bad.on("close", resolve));
+  bad.send(start("forged"));
+  await badClosed;
+
+  const twilioSide = await open();
+  const toCaller: any[] = [];
+  twilioSide.on("message", (data) => toCaller.push(JSON.parse(data.toString())));
+  twilioSide.send(start(token));
+  twilioSide.send(JSON.stringify({ event: "media", streamSid: "MZ1", media: { track: "inbound", payload: "AAAA" } }));
+
+  const waitFor = async (check: () => boolean) => {
+    for (let i = 0; i < 100 && !check(); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(check());
+  };
+  await waitFor(() => liveConnections.length === 1 && liveConnections[0].received.length > 0);
+  const live = liveConnections[0];
+  assert.equal(live.path, "/v1/live/sessions");
+  const sessionStart = live.received[0];
+  assert.equal(sessionStart.type, "session.start");
+  assert.equal(sessionStart.session.model, "gpt-live-1");
+  assert.deepEqual(sessionStart.session.audio.format, { type: "audio/pcmu", rate: 8000 });
+  assert.deepEqual(sessionStart.session.delegation, { type: "client" });
+  assert.match(sessionStart.session.instructions, /You are talking with Pat Example/);
+  assert.match(sessionStart.session.input[1].content[0].text, /recorded and transcribed/);
+
+  // Caller audio buffered before session.started is forwarded once it starts.
+  const send = (event: object) => live.ws.send(JSON.stringify(event));
+  send({ type: "session.started", event_id: "e1", session: { id: "sess_1", model: "gpt-live-1", status: "active", expires_at: 0 } });
+  await waitFor(() => live.received.some((e) => e.type === "session.input_audio.append" && e.audio === "AAAA"));
+
+  // GPT-Live speech is played to the caller.
+  send({ type: "session.output_audio.delta", delta: "//8=" });
+  await waitFor(() => toCaller.some((m) => m.event === "media" && m.media.payload === "//8=" && m.streamSid === "MZ1"));
+
+  // Transcripts are stored; a delegation gets an answer even when the backend fails.
+  send({ type: "session.input_transcript.delta", event_id: "t1", delta: "Call my plumber please", start_ms: 3000, end_ms: 4000 });
+  send({ type: "session.output_transcript.delta", event_id: "t2", delta: "Sure, one moment.", start_ms: 4500, end_ms: 5500 });
+  send({ type: "session.delegation.created", event_id: "d1", offset_ms: 5600, delegation: { id: "del_1", target: "client", type: "delegation" } });
+  await waitFor(() => live.received.some((e) => e.type === "session.commentary.append" && e.delegation_id === "del_1"));
+
+  twilioSide.send(JSON.stringify({ event: "stop", streamSid: "MZ1" }));
+  await waitFor(() => live.ws.readyState === WebSocket.CLOSED);
+  const conversation = (await db.query("SELECT id FROM conversations WHERE call_sid = 'CAuser'"))[0];
+  await new Promise((r) => setTimeout(r, 300));
+  const lines = await db.query("SELECT role, body FROM messages WHERE conversation_id = $1 ORDER BY id", [conversation.id]);
+  assert.ok(lines.some((l) => l.role === "user" && l.body === "Call my plumber please"));
+  assert.ok(lines.some((l) => l.role === "assistant" && l.body === "Sure, one moment."));
 
   const page = await (await fetch(`${base}/admin/conversations`, { headers: { Cookie: cookie } })).text();
   assert.match(page, /User call/);

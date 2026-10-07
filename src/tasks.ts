@@ -13,7 +13,7 @@ import {
 import { countryOf, formatPhone, toE164 } from "./phone.js";
 import { sendSms, twilioClient } from "./twilio.js";
 import { createRelaySession } from "./voice/sessions.js";
-import { buildRelayTwiml } from "./voice/twiml.js";
+import { buildCallTwiml } from "./voice/twiml.js";
 
 export class TaskError extends Error {}
 
@@ -99,7 +99,7 @@ export async function placeTaskCall(task: Task, user: User): Promise<void> {
     const call = await twilioClient.calls.create({
       to: task.target_phone,
       from: config.twilio.phoneNumber,
-      twiml: buildRelayTwiml(token, greeting),
+      twiml: buildCallTwiml(token, greeting),
       record: true,
       recordingStatusCallback: `${config.publicBaseUrl}/twilio/voice/recording`,
       recordingStatusCallbackEvent: ["completed"],

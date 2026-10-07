@@ -8,6 +8,7 @@ const { toE164 } = await import("../src/phone.js");
 const { withLock } = await import("../src/lock.js");
 const { createRelaySession, takeRelaySession } = await import("../src/voice/sessions.js");
 const { buildRelayTwiml } = await import("../src/voice/twiml.js");
+const { dtmfAudio, linearToMulaw } = await import("../src/voice/dtmf.js");
 
 test("splitMessage keeps short messages whole and splits long ones on whitespace", () => {
   assert.deepEqual(splitMessage("hello", 10), ["hello"]);
@@ -59,4 +60,13 @@ test("relay TwiML speaks an uninterruptible greeting and points at our websocket
   assert.match(xml, /<ConversationRelay [^>]*url="wss:\/\/agent\.test\/twilio\/relay\?token=tok"/);
   assert.match(xml, /welcomeGreeting="This call is being recorded\."/);
   assert.match(xml, /welcomeGreetingInterruptible="none"/);
+});
+
+test("DTMF tones are 8 kHz mu-law: 200 ms tone plus 100 ms gap per digit", () => {
+  assert.equal(linearToMulaw(0), 0xff);
+  assert.equal(linearToMulaw(32767), 0x80);
+  assert.equal(linearToMulaw(-32768), 0x00);
+  assert.equal(dtmfAudio("1").length, 2400);
+  assert.equal(dtmfAudio("1w2").length, 2400 * 2 + 4000);
+  assert.equal(dtmfAudio("x").length, 0);
 });

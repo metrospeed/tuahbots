@@ -15,7 +15,7 @@ import { finishTask } from "../tasks.js";
 import { requireTwilioSignature } from "../twilio.js";
 import { createRelaySession } from "../voice/sessions.js";
 import { finalizeCall } from "../voice/summary.js";
-import { buildRelayTwiml, sayAndHangup } from "../voice/twiml.js";
+import { buildCallTwiml, sayAndHangup } from "../voice/twiml.js";
 import { latestTaskForNumber } from "./sms.js";
 
 export const voiceRouter = express.Router();
@@ -38,7 +38,7 @@ async function inboundCallTwiml(from: string, callSid: string): Promise<string> 
     const conversation = await createConversation({ kind: "user_call", userId: user.id, counterpartPhone: from, direction: "inbound", callSid });
     const greeting = `Hi ${user.name.split(" ")[0]}, it's ${config.agent.name}. Just so you know, this call is recorded and transcribed. What can I do for you?`;
     const token = createRelaySession({ mode: "user", conversationId: conversation.id, userId: user.id, greeting });
-    return buildRelayTwiml(token, greeting);
+    return buildCallTwiml(token, greeting);
   }
 
   // A third party calling back about something we contacted them about.
@@ -56,7 +56,7 @@ async function inboundCallTwiml(from: string, callSid: string): Promise<string> 
     await query("UPDATE tasks SET status = 'in_progress', completed_at = NULL WHERE id = $1", [task.id]);
     const greeting = `Hi, this is ${config.agent.name}, an AI assistant for ${requester.name}, following up on our earlier message. This call is recorded and transcribed. How can I help?`;
     const token = createRelaySession({ mode: "task", conversationId: conversation.id, taskId: task.id, userId: requester.id, greeting });
-    return buildRelayTwiml(token, greeting);
+    return buildCallTwiml(token, greeting);
   }
 
   const conversation = await createConversation({ kind: "unknown_call", counterpartPhone: from, direction: "inbound", callSid });

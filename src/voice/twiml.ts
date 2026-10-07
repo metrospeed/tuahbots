@@ -30,3 +30,22 @@ export function sayAndHangup(text: string): string {
   response.hangup();
   return response.toString();
 }
+
+/**
+ * GPT-Live calls: play the recording/AI disclosure with <Say> (so it is always
+ * spoken verbatim), then stream call audio to our websocket. Twilio does not
+ * allow query strings on stream URLs, so the token goes in a <Parameter>.
+ */
+export function buildStreamTwiml(token: string, greeting: string): string {
+  const response = new twilio.twiml.VoiceResponse();
+  response.say({ voice: config.voice.disclosureVoice as any }, greeting);
+  const connect = response.connect({ action: `${config.publicBaseUrl}/twilio/voice/relay-ended` });
+  const stream = connect.stream({ url: `${config.publicBaseUrl.replace(/^http/, "ws")}/twilio/stream` });
+  stream.parameter({ name: "token", value: token });
+  return response.toString();
+}
+
+/** TwiML that connects a call to whichever voice engine is configured. */
+export function buildCallTwiml(token: string, greeting: string): string {
+  return config.voice.engine === "gpt-live" ? buildStreamTwiml(token, greeting) : buildRelayTwiml(token, greeting);
+}

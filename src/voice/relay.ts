@@ -3,12 +3,11 @@ import type { BetaContentBlockParam, BetaMessageParam } from "@anthropic-ai/sdk/
 import Anthropic from "@anthropic-ai/sdk";
 import { WebSocket, WebSocketServer } from "ws";
 import { runAgent, type AgentTool } from "../agent/claude.js";
-import { attachmentBlock, taskBrief, userDetails } from "../agent/context.js";
+import { recentSmsContext, taskBrief, userDetails } from "../agent/context.js";
 import { taskCallPrompt, USER_ASSISTANT_PROMPT, USER_VOICE_ADDENDUM } from "../agent/prompts.js";
 import { taskCallTools, userTools, type CallControls } from "../agent/tools.js";
 import { config } from "../config.js";
-import { addMessage, getTask, getUser, listMessages, query, type Attachment, type User } from "../db/index.js";
-import { userSmsConversation } from "../tasks.js";
+import { addMessage, getTask, getUser, query, type User } from "../db/index.js";
 import { twilioClient } from "../twilio.js";
 import { takeRelaySession, type RelaySession } from "./sessions.js";
 import { finalizeCall } from "./summary.js";
@@ -64,7 +63,7 @@ class RelayCall {
       this.system = `${USER_ASSISTANT_PROMPT}\n\n${USER_VOICE_ADDENDUM}`;
       this.systemDetails = await userDetails(user);
       this.tools = userTools(user, s.conversationId, this.controls);
-      this.messages.push({ role: "user", content: await this.recentSmsContext(user) });
+      this.messages.push({ role: "user", content: await recentSmsContext(user) });
     } else {
       const task = await getTask(s.taskId);
       if (!task) throw new Error(`Task ${s.taskId} missing`);
@@ -75,28 +74,6 @@ class RelayCall {
     }
     this.messages.push({ role: "assistant", content: s.greeting });
     await addMessage(s.conversationId, "assistant", s.greeting);
-  }
-
-  /** Give a calling user's agent their recent text thread and files, e.g. a quote they sent. */
-  private async recentSmsContext(user: User): Promise<BetaContentBlockParam[]> {
-    const thread = await userSmsConversation(user);
-    const recent = (await listMessages(thread.id, 20)).filter((m) => m.role !== "event");
-    const blocks: BetaContentBlockParam[] = [];
-    const files = await query<Attachment>(
-      `SELECT a.* FROM attachments a JOIN messages m ON m.id = a.message_id
-       WHERE m.conversation_id = $1 AND a.created_at > now() - interval '7 days' ORDER BY a.id DESC LIMIT 3`,
-      [thread.id],
-    );
-    if (files.length) {
-      blocks.push({ type: "text", text: "[Files the user recently texted you:]" });
-      blocks.push(...files.map(attachmentBlock));
-    }
-    const transcript = recent.map((m) => `${m.role === "assistant" ? "You" : "User"}: ${m.body}`).join("\n");
-    blocks.push({
-      type: "text",
-      text: `${transcript ? `[Your recent text messages with the user:]\n${transcript}\n\n` : ""}[The user is now calling you.]`,
-    });
-    return blocks;
   }
 
   private send(payload: Record<string, unknown>): void {

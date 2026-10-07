@@ -9,17 +9,20 @@ The agent reads the photo or PDF of the quote the user texted, calls Mike with a
 ## How it works
 
 ```
-Invited user ──SMS/call──► Twilio number ──webhooks──► app (Node/TS) ──► Claude
-                                   ▲                     │
-Third party ◄──call/SMS────────────┘◄── Twilio REST ─────┘
+Invited user ──SMS/call──► Twilio number ──webhooks──► app (Node/TS) ──► Claude (texts, tools)
+                                   ▲                     │  ▲
+Third party ◄──call/SMS────────────┘◄── Twilio REST ─────┘  │ delegated tasks
+                                                         │  │
+                    call audio (μ-law) ◄──Media Streams──►  app ◄──► OpenAI GPT-Live (voice)
                                                          │
                                        Postgres ◄────────┘──► /admin panel
 ```
 
 - **SMS**: Twilio posts to `/twilio/sms`. Texts from invited users go to the *user agent*. Replies from a number the agent contacted for a task go to that task's *task agent*. Texts from anyone else are logged and get no reply.
-- **Voice**: calls use [Twilio ConversationRelay](https://www.twilio.com/docs/voice/conversationrelay), which handles speech-to-text and text-to-speech over a websocket (`/twilio/relay`). Claude's reply is streamed back token by token, so the agent starts speaking quickly. Callers can interrupt it.
+- **Voice (GPT-Live)**: on every call, the caller's audio streams over [Twilio Media Streams](https://www.twilio.com/docs/voice/media-streams) (`/twilio/stream`) to OpenAI's `gpt-live-1`. It's a full-duplex speech model: it listens while it talks and handles interruptions and "mhmm"s naturally. Twilio and GPT-Live both use 8 kHz μ-law audio, so nothing is converted. GPT-Live handles the conversation itself. When it needs something done (place a call, send a text, check a task, press keypad digits in a phone menu, hang up), it delegates the task. Claude then runs the same tools the SMS agent uses, seeing the live transcript plus any files the user texted, and hands back a short result for GPT-Live to say. Transcripts are saved line by line as the call goes.
+  - Prefer the old pipeline? Set `VOICE_ENGINE=claude-relay` to use [Twilio ConversationRelay](https://www.twilio.com/docs/voice/conversationrelay) speech-to-text and text-to-speech with Claude speaking directly.
 - **Tasks**: the user agent has tools: `call_number`, `text_number`, `list_tasks`, `followup_task`, `cancel_task`. A task gets its own agent, which only sees a written brief, not the user's whole history. On calls it can press keypad digits for phone menus and leave voicemail. When the task finishes, the requester gets a text with the result.
-- **Disclosure**: every call starts with a greeting the caller can't interrupt, e.g. *"Hi Mike, this is Tuah, an AI assistant calling on behalf of Pat. This call is being recorded and transcribed."* The first text to a new number ends with a footer saying it's an AI assistant writing for that person, with STOP instructions.
+- **Disclosure**: every call starts with a greeting Twilio speaks word for word before the AI joins (a fixed `<Say>`, so the model can't skip or reword it), e.g. *"Hi Mike, this is Tuah, an AI assistant calling on behalf of Pat. This call is being recorded and transcribed."* The first text to a new number ends with a footer saying it's an AI assistant writing for that person, with STOP instructions.
 - **Recording**: outbound calls are recorded from the moment they're answered, and inbound calls as soon as the agent connects. You can play recordings in the admin panel, which streams them from Twilio.
 - **Admin panel** (`/admin`, password login): transcripts (searchable, with audio, attachments, and AI summaries), tasks, invited users (with optional welcome text and per-user notes for the agent), and blocked numbers.
 
@@ -32,7 +35,7 @@ Third party ◄──call/SMS────────────┘◄── Tw
 
 ## Deploy on DigitalOcean
 
-You need a Twilio account with a phone number (voice + SMS), an Anthropic API key, and a domain.
+You need a Twilio account with a phone number (voice + SMS), an Anthropic API key, an OpenAI API key with GPT-Live access, and a domain. GPT-Live costs about $0.05 per call minute on top of Twilio's per-minute rates and the Claude usage for delegated tasks.
 
 1. **Create a droplet**: Ubuntu 24.04, Basic, 1 GB RAM ($6/mo) is enough. Turn on backups. Add your SSH key.
 2. **DNS**: create an `A` record such as `agent.example.com` pointing at the droplet's IP.
