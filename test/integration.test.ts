@@ -75,7 +75,11 @@ before(async () => {
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
+/** Client sockets opened by tests, closed in after() so a failing test can't keep the process alive. */
+const testSockets: WebSocket[] = [];
+
 after(async () => {
+  for (const socket of testSockets) socket.terminate();
   // Prewarmed GPT-Live sessions for calls that never streamed are still open;
   // drop them so the process can exit.
   for (const client of fakeLive.clients) client.terminate();
@@ -922,4 +926,58 @@ test("admin two-factor: code required, 30-minute sessions, no code reuse, recove
   assert.equal((await adminPassword()).location, "/admin/login/setup");
   adminSession = "";
   await login(); // re-enrolls with a new secret for any later tests
+});
+
+/** Start an invited user's GPT-Live call against the fake servers; returns both sides. */
+async function startLiveCall(phone: string, callSid: string) {
+  const before = liveConnections.length;
+  const xml = await (await twilioPost("/twilio/voice", { From: phone, CallSid: callSid })).text();
+  const token = /<Parameter name="token" value="([^"]+)"/.exec(xml)![1];
+  // The GPT-Live session is opened while the greeting plays; wait for it.
+  for (let i = 0; i < 100 && !liveConnections[before]?.received.some((e) => e.type === "session.start"); i++) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const live = liveConnections[before];
+  assert.ok(live, "GPT-Live session opened");
+  const twilioSide = new WebSocket(`${base.replace("http", "ws")}/twilio/stream`);
+  testSockets.push(twilioSide);
+  await new Promise((resolve) => twilioSide.on("open", resolve));
+  const toCaller: any[] = [];
+  twilioSide.on("message", (data) => toCaller.push(JSON.parse(data.toString())));
+  twilioSide.send(JSON.stringify({ event: "start", streamSid: "MZ" + callSid, start: { streamSid: "MZ" + callSid, callSid, customParameters: { token } } }));
+  const send = (event: object) => live.ws.send(JSON.stringify(event));
+  send({ type: "session.started", event_id: "s", session: { id: "sess_" + callSid, model: "gpt-live-1", status: "active", expires_at: 0 } });
+  await new Promise((r) => setTimeout(r, 200));
+  return { live, twilioSide, toCaller, send };
+}
+
+test("the call hangs up after the agent says goodbye, even without a hang-up delegation", { skip: !enabled }, async () => {
+  await db.query("INSERT INTO users (name, phone) VALUES ('Gail Goodbye', '+14155550777') ON CONFLICT (phone) DO NOTHING");
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  // 1) A goodbye followed by "bye" from the caller ends the call once the goodbye has played.
+  const a = await startLiveCall("+14155550777", "CAbye1");
+  a.send({ type: "session.input_transcript.delta", event_id: "u1", delta: "That's everything, thanks.", start_ms: 1000, end_ms: 2000 });
+  a.send({ type: "session.output_transcript.delta", event_id: "a1", delta: "You're welcome, Gail. Goodbye!", start_ms: 2200, end_ms: 3500 });
+  a.send({ type: "session.output_audio.delta", delta: "//8=" });
+  await sleep(600);
+  a.send({ type: "session.input_transcript.delta", event_id: "u2", delta: "Bye!", start_ms: 3800, end_ms: 4100 });
+  let mark: any;
+  for (let i = 0; i < 80 && !(mark = a.toCaller.find((m) => m.event === "mark")); i++) await sleep(100);
+  assert.equal(mark?.mark.name, "hangup", "asks Twilio to report when the goodbye has played");
+  assert.ok(!a.live.received.some((e) => e.type === "session.close"), "waits for playback before hanging up");
+  a.twilioSide.send(JSON.stringify({ event: "mark", streamSid: "MZCAbye1", mark: { name: "hangup" } }));
+  for (let i = 0; i < 30 && !a.live.received.some((e) => e.type === "session.close"); i++) await sleep(50);
+  assert.ok(a.live.received.some((e) => e.type === "session.close"));
+  a.twilioSide.close();
+
+  // 2) If the caller has more to say after the goodbye, the call stays up.
+  const b = await startLiveCall("+14155550777", "CAbye2");
+  b.send({ type: "session.output_transcript.delta", event_id: "b1", delta: "Okay, bye!", start_ms: 1000, end_ms: 1800 });
+  b.send({ type: "session.output_audio.delta", delta: "//8=" });
+  await sleep(500);
+  b.send({ type: "session.input_transcript.delta", event_id: "b2", delta: "Wait, one more thing, can you also call the plumber?", start_ms: 2000, end_ms: 4000 });
+  await sleep(4500);
+  assert.ok(!b.toCaller.some((m) => m.event === "mark"), "no hang-up while the caller is still talking business");
+  b.twilioSide.close();
 });
