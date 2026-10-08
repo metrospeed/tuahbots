@@ -754,6 +754,28 @@ test("recordings are copied to our database, then deleted from Twilio; failures 
   await sweepRecordings();
   assert.equal((await stored("RE3")).size, 800);
   assert.ok(!twilioRecordings.has("RE3"));
+
+  // Audio ffmpeg can't decode is kept as it came from Twilio.
+  const normalized = async (sid: string) => (await db.query("SELECT normalized FROM recordings WHERE recording_sid = $1", [sid]))[0]?.normalized;
+  assert.equal(await normalized("RE1"), false);
+
+  // A real (quiet) recording is stored volume-normalized.
+  const { execFileSync } = await import("node:child_process");
+  let quiet: Buffer;
+  try {
+    quiet = execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=400:d=3,volume=0.03", "-ar", "8000", "-ac", "1", "-b:a", "32k", "-f", "mp3", "pipe:1"]);
+  } catch {
+    return; // ffmpeg not installed here
+  }
+  const loud = (
+    await db.query("INSERT INTO conversations (kind, counterpart_phone, direction, call_sid) VALUES ('task_call', '+14155550403', 'outbound', 'CArec4') RETURNING id")
+  )[0];
+  twilioRecordings.set("RE4", quiet);
+  await twilioPost("/twilio/voice/recording", { CallSid: "CArec4", RecordingSid: "RE4", RecordingDuration: "3", RecordingStatus: "completed" });
+  await waitFor(async () => !!(await stored("RE4"))?.twilio_deleted_at);
+  assert.equal(await normalized("RE4"), true);
+  const playback = Buffer.from(await (await fetch(`${base}/admin/recordings/${loud.id}.mp3`, { headers: { Cookie: admin } })).arrayBuffer());
+  assert.notDeepEqual(playback, quiet);
 });
 
 test("security headers: strict CSP with no inline scripts, no framing, HSTS on HTTPS", { skip: !enabled }, async () => {

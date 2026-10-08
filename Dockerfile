@@ -7,6 +7,8 @@ COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-alpine
+# ffmpeg normalizes the volume of call recordings.
+RUN apk add --no-cache ffmpeg
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build /app/node_modules ./node_modules

@@ -135,6 +135,8 @@ CREATE TABLE IF NOT EXISTS recordings (
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS recordings_conversation_idx ON recordings (conversation_id);
+-- null: not yet volume-normalized; true: normalized; false: ffmpeg couldn't process it (kept as is).
+ALTER TABLE recordings ADD COLUMN IF NOT EXISTS normalized BOOLEAN;
 
 -- Admin sign-in second factor (single row). The TOTP secret is encrypted with
 -- a key derived from SESSION_SECRET; recovery codes are stored as hashes.
