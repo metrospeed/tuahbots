@@ -1,6 +1,6 @@
 import { AgentRunError, runAgent } from "../agent/llm.js";
 import { historyFromTranscript, userDetails } from "../agent/context.js";
-import { USER_ASSISTANT_PROMPT } from "../agent/prompts.js";
+import { loadPromptOverrides, USER_ASSISTANT_PROMPT } from "../agent/prompts.js";
 import { userTools } from "../agent/tools.js";
 import { addMessage, pool, queryOne, type User } from "../db/index.js";
 import { withLock } from "../lock.js";
@@ -46,6 +46,7 @@ async function answer(user: User, conversationId: number): Promise<void> {
   );
   if (last?.role !== "user") return;
   try {
+    await loadPromptOverrides();
     const result = await runAgent({
       system: USER_ASSISTANT_PROMPT,
       systemDetails: await userDetails(user),

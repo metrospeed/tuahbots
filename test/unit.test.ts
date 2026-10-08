@@ -78,3 +78,34 @@ test("settings validation keeps the disclosures and sane hours", () => {
   assert.match(validateSettings({ ...DEFAULT_SETTINGS, maxCallMinutes: 0 })!, /time limit/);
   assert.match(validateSettings({ ...DEFAULT_SETTINGS, timezone: "Nowhere/Land" })!, /time zone/);
 });
+
+const prompts = await import("../src/agent/prompts.js");
+
+test("prompts use the built-in defaults when no override is stored", () => {
+  for (const def of prompts.PROMPTS) {
+    assert.equal(prompts.isPromptOverridden(def.key), false);
+    assert.equal(prompts.promptTemplate(def.key), def.defaultText);
+    assert.equal(prompts.validatePrompt(def.key, def.defaultText), null, `${def.key} default is valid`);
+  }
+  assert.match(prompts.USER_ASSISTANT_PROMPT, /^You are Tuah, an AI assistant that invited users chat with/);
+  assert.doesNotMatch(prompts.USER_ASSISTANT_PROMPT, /\{agent\}/);
+  assert.match(prompts.taskCallPrompt(), /^You are Tuah, an AI assistant placing a phone call/);
+  // GPT-Live prompts get the shared style filled in and their runtime context appended.
+  const live = prompts.liveUserInstructions("You are talking with Pat.");
+  assert.match(live, /\n\nYou are speaking on a live phone call\. Sound natural/);
+  assert.match(live, /\n\nYou are talking with Pat\.$/);
+  assert.match(prompts.liveTaskInstructions("Objective: confirm the quote"), /\n\nObjective: confirm the quote$/);
+});
+
+test("prompt edits are validated: not empty, not too long, known placeholders, required ones kept", () => {
+  assert.equal(prompts.validatePrompt("userAssistant", "You are {agent}.\r\nBe brief."), null);
+  assert.match(prompts.validatePrompt("userAssistant", " \r\n ")!, /can't be empty/);
+  assert.match(prompts.validatePrompt("userAssistant", "x".repeat(prompts.MAX_PROMPT_LENGTH + 1))!, /under 8,000 characters/);
+  assert.match(prompts.validatePrompt("userAssistant", "You are {name} for {requester}.")!, /Unknown placeholders \{name\}, \{requester\}/);
+  assert.match(prompts.validatePrompt("taskCall", "Use {style}.")!, /Unknown placeholder \{style\}/);
+  assert.match(prompts.validatePrompt("liveTask", "You are {agent} on a call.")!, /must keep \{style\}/);
+  assert.equal(prompts.validatePrompt("liveTask", "You are {agent} on a call.\n{style}"), null);
+  assert.equal(prompts.validatePrompt("userAssistant", 'Reply as JSON like {"ok": true}.'), null, "braces that aren't placeholders are fine");
+  assert.equal(prompts.normalizePrompt("  a\r\nb\rc  "), "a\nb\nc");
+  assert.equal(prompts.promptDefinition("nope"), undefined);
+});

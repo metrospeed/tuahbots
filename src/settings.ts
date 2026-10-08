@@ -53,13 +53,30 @@ export async function getSettings(): Promise<Settings> {
 }
 
 export async function saveSettings(changes: Partial<Settings>): Promise<void> {
-  for (const [key, value] of Object.entries(changes)) {
+  await saveSettingValues(changes);
+}
+
+// Raw access to the settings table, for other admin-editable values (such as
+// prompt overrides in src/agent/prompts.ts) that live beside the typed Settings.
+
+/** Stored values whose key starts with `prefix`. */
+export async function readSettingValues(prefix: string): Promise<Record<string, unknown>> {
+  const rows = await query<{ key: string; value: unknown }>("SELECT key, value FROM settings WHERE starts_with(key, $1)", [prefix]);
+  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+}
+
+export async function saveSettingValues(values: Record<string, unknown>): Promise<void> {
+  for (const [key, value] of Object.entries(values)) {
     await pool.query(
       `INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, now())
        ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()`,
       [key, JSON.stringify(value)],
     );
   }
+}
+
+export async function deleteSettingValues(keys: string[]): Promise<void> {
+  if (keys.length) await pool.query("DELETE FROM settings WHERE key = ANY($1)", [keys]);
 }
 
 /** Fill a greeting template. Unknown placeholders are left as typed. */
