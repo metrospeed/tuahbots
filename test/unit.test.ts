@@ -8,6 +8,26 @@ const { withLock } = await import("../src/lock.js");
 const { createRelaySession, takeRelaySession } = await import("../src/voice/sessions.js");
 const { buildRelayTwiml } = await import("../src/voice/twiml.js");
 const { dtmfAudio, linearToMulaw } = await import("../src/voice/dtmf.js");
+const { normalizeRecording } = await import("../src/recordings.js");
+const { execFileSync, spawnSync } = await import("node:child_process");
+
+let hasFfmpeg = true;
+try {
+  execFileSync("ffmpeg", ["-version"], { stdio: "ignore" });
+} catch {
+  hasFfmpeg = false;
+}
+
+/** A quiet MP3 like Twilio's: 8 kHz mono, a tone peaking around -30 dBFS. */
+function quietMp3(): Buffer {
+  return execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=400:d=3,volume=0.03", "-ar", "8000", "-ac", "1", "-b:a", "32k", "-f", "mp3", "pipe:1"]);
+}
+
+/** Mean volume of some audio in dB, as measured by ffmpeg. */
+function meanVolume(audio: Buffer): number {
+  const out = spawnSync("ffmpeg", ["-hide_banner", "-i", "pipe:0", "-af", "volumedetect", "-f", "null", "-"], { input: audio }).stderr.toString();
+  return Number(/mean_volume: (-?[\d.]+) dB/.exec(out)?.[1]);
+}
 
 test("toE164 normalizes US numbers and rejects junk", () => {
   assert.equal(toE164("(415) 555-2671"), "+14155552671");
@@ -79,6 +99,18 @@ test("settings validation keeps the disclosures and sane hours", () => {
   assert.match(validateSettings({ ...DEFAULT_SETTINGS, timezone: "Nowhere/Land" })!, /time zone/);
 });
 
+test("quiet call recordings are normalized to a comfortable volume", { skip: !hasFfmpeg && "ffmpeg not installed" }, async () => {
+  const quiet = quietMp3();
+  const louder = await normalizeRecording(quiet);
+  assert.ok(louder?.length);
+  const before = meanVolume(quiet);
+  const after = meanVolume(louder);
+  assert.ok(after - before > 15, `expected at least 15 dB louder, got ${before} -> ${after}`);
+  assert.ok(after < -3, "not clipped");
+  // Anything ffmpeg can't decode is reported as null, so the original is kept.
+  assert.equal(await normalizeRecording(Buffer.alloc(500, 7)), null);
+});
+
 const { endsWithFarewell, isClosingReply } = await import("../src/voice/goodbye.js");
 
 test("goodbye detection: the agent's farewell at the end of what it said", () => {
@@ -93,4 +125,35 @@ test("goodbye detection: the agent's farewell at the end of what it said", () =>
 test("goodbye detection: closing replies vs. a new topic", () => {
   for (const reply of ["Bye!", "Thanks, you too.", "Okay, bye bye", "Thank you so much, have a good day", "mhm"]) assert.ok(isClosingReply(reply), reply);
   for (const reply of ["Wait, one more thing", "Actually can you also ask about Friday?", "Hold on, the price changed"]) assert.ok(!isClosingReply(reply), reply);
+});
+
+const prompts = await import("../src/agent/prompts.js");
+
+test("prompts use the built-in defaults when no override is stored", () => {
+  for (const def of prompts.PROMPTS) {
+    assert.equal(prompts.isPromptOverridden(def.key), false);
+    assert.equal(prompts.promptTemplate(def.key), def.defaultText);
+    assert.equal(prompts.validatePrompt(def.key, def.defaultText), null, `${def.key} default is valid`);
+  }
+  assert.match(prompts.USER_ASSISTANT_PROMPT, /^You are Tuah, an AI assistant that invited users chat with/);
+  assert.doesNotMatch(prompts.USER_ASSISTANT_PROMPT, /\{agent\}/);
+  assert.match(prompts.taskCallPrompt(), /^You are Tuah, an AI assistant placing a phone call/);
+  // GPT-Live prompts get the shared style filled in and their runtime context appended.
+  const live = prompts.liveUserInstructions("You are talking with Pat.");
+  assert.match(live, /\n\nYou are speaking on a live phone call\. Sound natural/);
+  assert.match(live, /\n\nYou are talking with Pat\.$/);
+  assert.match(prompts.liveTaskInstructions("Objective: confirm the quote"), /\n\nObjective: confirm the quote$/);
+});
+
+test("prompt edits are validated: not empty, not too long, known placeholders, required ones kept", () => {
+  assert.equal(prompts.validatePrompt("userAssistant", "You are {agent}.\r\nBe brief."), null);
+  assert.match(prompts.validatePrompt("userAssistant", " \r\n ")!, /can't be empty/);
+  assert.match(prompts.validatePrompt("userAssistant", "x".repeat(prompts.MAX_PROMPT_LENGTH + 1))!, /under 8,000 characters/);
+  assert.match(prompts.validatePrompt("userAssistant", "You are {name} for {requester}.")!, /Unknown placeholders \{name\}, \{requester\}/);
+  assert.match(prompts.validatePrompt("taskCall", "Use {style}.")!, /Unknown placeholder \{style\}/);
+  assert.match(prompts.validatePrompt("liveTask", "You are {agent} on a call.")!, /must keep \{style\}/);
+  assert.equal(prompts.validatePrompt("liveTask", "You are {agent} on a call.\n{style}"), null);
+  assert.equal(prompts.validatePrompt("userAssistant", 'Reply as JSON like {"ok": true}.'), null, "braces that aren't placeholders are fine");
+  assert.equal(prompts.normalizePrompt("  a\r\nb\rc  "), "a\nb\nc");
+  assert.equal(prompts.promptDefinition("nope"), undefined);
 });

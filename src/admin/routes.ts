@@ -28,6 +28,19 @@ import { decryptSecret, encryptSecret, generateRecoveryCodes, generateSecret, ot
 import { codePage, esc, fmtDate, layout, loginPage, recoveryCodesPage, setCallsEnabledBanner, setupPage } from "./views.js";
 import { DEFAULT_SETTINGS, GREETING_PLACEHOLDERS, getSettings, saveSettings, validateSettings, type Settings } from "../settings.js";
 import { twilioClient } from "../twilio.js";
+import {
+  MAX_PROMPT_LENGTH,
+  PLACEHOLDER_HELP,
+  PROMPTS,
+  isPromptOverridden,
+  loadPromptOverrides,
+  promptDefinition,
+  promptTemplate,
+  resetPromptOverride,
+  savePromptOverride,
+  validatePrompt,
+  type PromptKey,
+} from "../agent/prompts.js";
 
 export const adminRouter = express.Router();
 
@@ -603,6 +616,75 @@ async function endActiveCalls(): Promise<number> {
   }
   return ended;
 }
+
+// ---- Prompts -------------------------------------------------------------
+
+function promptsPage(opts: { notice?: string; error?: { key: PromptKey; message: string; text: string } } = {}): string {
+  const cards = PROMPTS.map((def) => {
+    const failed = opts.error?.key === def.key ? opts.error : undefined;
+    const text = failed ? failed.text : promptTemplate(def.key);
+    const overridden = isPromptOverridden(def.key);
+    const rows = Math.min(24, Math.max(4, text.split("\n").length + Math.ceil(text.length / 110)));
+    const placeholders = def.placeholders
+      .map((p) => `<code>${esc(p)}</code> ${esc(PLACEHOLDER_HELP[p] ?? "")}${def.required.includes(p) ? " (required)" : ""}`)
+      .join("; ");
+    return `<div class="card" id="prompt-${def.key}">
+      <h3>${esc(def.label)} <span class="badge">${overridden ? "Customized" : "Default"}</span></h3>
+      <p class="small muted">${esc(def.usedFor)}</p>
+      ${failed ? `<p class="bad" role="alert">${esc(failed.message)}</p>` : ""}
+      <form method="post" action="/admin/prompts/${def.key}">
+        <textarea class="wide" name="text" rows="${rows}" maxlength="${MAX_PROMPT_LENGTH}" required>${esc(text)}</textarea>
+        <p class="small muted">Placeholders: ${placeholders}.<br>Added automatically after this prompt: ${esc(def.addedByCode)}</p>
+        <div class="row"><button class="primary">Save</button></div>
+      </form>
+      ${
+        overridden
+          ? `<form method="post" action="/admin/prompts/${def.key}/reset" class="row" style="margin-top:8px"
+              data-confirm="${esc(`Reset "${def.label}" to the built-in default? Your edited version will be discarded.`)}">
+              <button>Reset to default</button></form>`
+          : ""
+      }
+      <details><summary class="small muted">Built-in default</summary><div class="msg">${esc(def.defaultText)}</div></details>
+    </div>`;
+  }).join("");
+  return layout(
+    "Prompts",
+    `${opts.notice ? `<div class="card ok">${esc(opts.notice)}</div>` : ""}${
+      opts.error ? `<div class="card bad">Not saved: ${esc(promptDefinition(opts.error.key)!.label)}. ${esc(opts.error.message)}</div>` : ""
+    }
+     <div class="card"><h3>AI prompts</h3>
+      <p class="small muted">The instructions each AI model gets. Changes apply to the next chat reply and the next call; calls already in progress keep the prompt they started with.
+      Context the agent needs at runtime (who it's talking to, the call brief, the time, its tools) is always added by the app after the prompt, so you don't need to include it.
+      Up to ${MAX_PROMPT_LENGTH.toLocaleString("en-US")} characters each.</p></div>
+     ${cards}`,
+    "/admin/prompts",
+  );
+}
+
+adminRouter.get("/admin/prompts", async (req, res) => {
+  await loadPromptOverrides();
+  const saved = promptDefinition(String(req.query.saved ?? ""));
+  const reset = promptDefinition(String(req.query.reset ?? ""));
+  const notice = saved ? `Saved "${saved.label}".` : reset ? `"${reset.label}" is back to the built-in default.` : "";
+  res.send(promptsPage({ notice }));
+});
+
+adminRouter.post("/admin/prompts/:key", async (req, res) => {
+  const def = promptDefinition(req.params.key);
+  if (!def) return void res.status(404).send(layout("Not found", "<p>Prompt not found.</p>"));
+  const text = typeof req.body.text === "string" ? req.body.text : "";
+  const error = validatePrompt(def.key, text);
+  if (error) return void res.status(400).send(promptsPage({ error: { key: def.key, message: error, text } }));
+  await savePromptOverride(def.key, text);
+  res.redirect(`/admin/prompts?saved=${def.key}#prompt-${def.key}`);
+});
+
+adminRouter.post("/admin/prompts/:key/reset", async (req, res) => {
+  const def = promptDefinition(req.params.key);
+  if (!def) return void res.status(404).send(layout("Not found", "<p>Prompt not found.</p>"));
+  await resetPromptOverride(def.key);
+  res.redirect(`/admin/prompts?reset=${def.key}#prompt-${def.key}`);
+});
 
 // ---- Numbers -------------------------------------------------------------
 

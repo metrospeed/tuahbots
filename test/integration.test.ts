@@ -11,12 +11,15 @@ const enabled = !!process.env.TEST_DATABASE_URL;
 
 // A stand-in for the OpenAI API: GPT-Live over WebSocket, and the Responses API
 // over HTTP. In a call, the agent model ends the call; elsewhere it errors, so
-// the app's failure handling is exercised too.
+// the app's failure handling is exercised too. Responses API requests are kept
+// so tests can check the instructions the app sent.
+const openAIRequests: any[] = [];
 const fakeOpenAI = http.createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
   req.on("end", () => {
     const request = JSON.parse(body || "{}");
+    openAIRequests.push(request);
     const tools: string[] = (request.tools ?? []).map((t: any) => t.name);
     // Summaries send a plain-string input; tool loops send a list of items.
     const answered = Array.isArray(request.input) && request.input.some((i: any) => i.type === "function_call_output");
@@ -553,6 +556,118 @@ test("admin settings control greetings, hours, time limit and the calls switch",
   assert.match(back, /<Stream/);
 });
 
+test("admin prompts: login required, validated, escaped, used by the next chat reply, reset restores the default", { skip: !enabled }, async () => {
+  const prompts = await import("../src/agent/prompts.js");
+  const savePrompt = (key: string, text: string, cookie: string) =>
+    fetch(`${base}/admin/prompts/${key}`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", ...(cookie ? { Cookie: cookie } : {}) },
+      body: new URLSearchParams({ text }),
+    });
+  const storedPrompts = async () => (await db.query("SELECT key FROM settings WHERE key LIKE 'prompt.%'")).map((r) => r.key);
+
+  // Signed out: no viewing, no saving, no resetting.
+  const view = await fetch(`${base}/admin/prompts`, { redirect: "manual" });
+  assert.equal(view.status, 302);
+  assert.equal(view.headers.get("location"), "/admin/login");
+  const anonSave = await savePrompt("userAssistant", "Hijacked prompt.", "");
+  assert.equal(anonSave.headers.get("location"), "/admin/login");
+  const anonReset = await fetch(`${base}/admin/prompts/userAssistant/reset`, { method: "POST", redirect: "manual" });
+  assert.equal(anonReset.headers.get("location"), "/admin/login");
+  assert.deepEqual(await storedPrompts(), []);
+
+  // Signed in: every prompt is listed with its default.
+  const cookie = await login();
+  const page = await (await fetch(`${base}/admin/prompts`, { headers: { Cookie: cookie } })).text();
+  for (const def of prompts.PROMPTS) assert.match(page, new RegExp(`action="/admin/prompts/${def.key}"`));
+  assert.match(page, /You are \{agent\}, an AI assistant that invited users chat with/);
+  assert.doesNotMatch(page, /Reset to default/);
+
+  // Input is validated.
+  assert.equal((await savePrompt("userAssistant", "   ", cookie)).status, 400);
+  const typo = await savePrompt("userAssistant", "You are {agnet}.", cookie);
+  assert.equal(typo.status, 400);
+  assert.match(await typo.text(), /Unknown placeholder \{agnet\}/);
+  const noStyle = await savePrompt("liveUser", "You are {agent}.", cookie);
+  assert.equal(noStyle.status, 400);
+  assert.match(await noStyle.text(), /must keep \{style\}/);
+  assert.equal((await savePrompt("userAssistant", "x".repeat(prompts.MAX_PROMPT_LENGTH + 1), cookie)).status, 400);
+  assert.equal((await savePrompt("noSuchPrompt", "Hello.", cookie)).status, 404);
+  assert.deepEqual(await storedPrompts(), []);
+
+  // A valid edit is saved, shown escaped, and takes effect without a restart.
+  const custom = "You are {agent}, a terse assistant.\r\n<script>alert(1)</script> Answer in one line.";
+  const saved = await savePrompt("userAssistant", custom, cookie);
+  assert.equal(saved.status, 302);
+  assert.equal(saved.headers.get("location"), "/admin/prompts?saved=userAssistant#prompt-userAssistant");
+  const edited = await (await fetch(`${base}/admin/prompts?saved=userAssistant`, { headers: { Cookie: cookie } })).text();
+  assert.match(edited, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(edited, /<script>alert/);
+  assert.match(edited, /Saved &quot;User assistant \(web chat\)&quot;/);
+  assert.match(edited, /action="\/admin\/prompts\/userAssistant\/reset"/);
+  assert.deepEqual(await storedPrompts(), ["prompt.userAssistant"]);
+  const expected = "You are Tuah, a terse assistant.\n<script>alert(1)</script> Answer in one line.";
+  assert.equal(prompts.USER_ASSISTANT_PROMPT, expected);
+
+  // The next chat reply uses it, and the user's details are still sent alongside.
+  const invite = await fetch(`${base}/admin/users`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+    body: new URLSearchParams({ name: "Prompt Tester", phone: "" }),
+  });
+  const link = /https:\/\/agent\.test(\/join\/[A-Za-z0-9_-]+)/.exec(await invite.text())![1];
+  const userCookie = await createLogin(link, "prompts@example.com", "correct horse battery");
+  const chatInstructions = async (text: string) => {
+    const before = openAIRequests.length;
+    const sent = await fetch(`${base}/app/api/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: userCookie },
+      body: JSON.stringify({ text }),
+    });
+    assert.equal(sent.status, 200);
+    const find = () => openAIRequests.slice(before).find((r) => JSON.stringify(r.input ?? "").includes(text));
+    for (let i = 0; i < 100 && !find(); i++) await new Promise((r) => setTimeout(r, 50));
+    const request = find();
+    assert.ok(request, "the chat agent called the model");
+    // Let the reply (an apology, since the fake model errors) land before the next message.
+    for (let i = 0; i < 100; i++) {
+      const state = await (await fetch(`${base}/app/api/state`, { headers: { Cookie: userCookie } })).json();
+      if (!state.busy) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return request;
+  };
+  const withOverride = await chatInstructions("Hi there");
+  assert.equal(withOverride.instructions, expected);
+  assert.match(JSON.stringify(withOverride.input), /You are talking with Prompt Tester/);
+
+  // Call prompts keep their runtime context appended, whatever the edit says.
+  assert.equal((await savePrompt("liveTask", "You are {agent} on a call.\n\n{style}", cookie)).status, 302);
+  const live = prompts.liveTaskInstructions("Objective: confirm the quote");
+  assert.match(live, /^You are Tuah on a call\.\n\nYou are speaking on a live phone call\./);
+  assert.match(live, /\n\nObjective: confirm the quote$/);
+  assert.equal((await savePrompt("userVoice", "Keep it brief on the phone.", cookie)).status, 302);
+  assert.equal(prompts.USER_VOICE_ADDENDUM, "Keep it brief on the phone.");
+
+  // Saving the default text again just clears the override.
+  const voiceDefault = prompts.promptDefinition("userVoice")!.defaultText;
+  assert.equal((await savePrompt("userVoice", voiceDefault, cookie)).status, 302);
+  assert.equal(prompts.isPromptOverridden("userVoice"), false);
+
+  // Reset goes back to the built-in default, for the next reply too.
+  for (const key of ["userAssistant", "liveTask"]) {
+    const reset = await fetch(`${base}/admin/prompts/${key}/reset`, { method: "POST", redirect: "manual", headers: { Cookie: cookie } });
+    assert.equal(reset.status, 302);
+    assert.equal(reset.headers.get("location"), `/admin/prompts?reset=${key}#prompt-${key}`);
+  }
+  assert.deepEqual(await storedPrompts(), []);
+  assert.equal(prompts.promptTemplate("userAssistant"), prompts.promptDefinition("userAssistant")!.defaultText);
+  const afterReset = await chatInstructions("Hello again");
+  assert.match(afterReset.instructions, /^You are Tuah, an AI assistant that invited users chat with on a private website/);
+  assert.doesNotMatch(afterReset.instructions, /terse/);
+});
+
 test("an answered outbound call plays the configured greeting, unless calls were turned off", { skip: !enabled }, async () => {
   const cookie = await login();
   const user = (await db.query("SELECT * FROM users WHERE phone = '+14155552671'"))[0];
@@ -758,6 +873,30 @@ test("recordings are copied to our database, then deleted from Twilio; failures 
   await sweepRecordings();
   assert.equal((await stored("RE3")).size, 800);
   assert.ok(!twilioRecordings.has("RE3"));
+
+  // Without ffmpeg, recordings are kept as is and left for a later normalize attempt.
+  const normalized = async (sid: string) => (await db.query("SELECT normalized FROM recordings WHERE recording_sid = $1", [sid]))[0]?.normalized;
+  const { execFileSync } = await import("node:child_process");
+  let quiet: Buffer;
+  try {
+    quiet = execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=400:d=3,volume=0.03", "-ar", "8000", "-ac", "1", "-b:a", "32k", "-f", "mp3", "pipe:1"]);
+  } catch {
+    assert.equal(await normalized("RE1"), null);
+    return;
+  }
+  // Audio ffmpeg can't decode is kept as it came from Twilio.
+  assert.equal(await normalized("RE1"), false);
+
+  // A real (quiet) recording is stored volume-normalized.
+  const loud = (
+    await db.query("INSERT INTO conversations (kind, counterpart_phone, direction, call_sid) VALUES ('task_call', '+14155550403', 'outbound', 'CArec4') RETURNING id")
+  )[0];
+  twilioRecordings.set("RE4", quiet);
+  await twilioPost("/twilio/voice/recording", { CallSid: "CArec4", RecordingSid: "RE4", RecordingDuration: "3", RecordingStatus: "completed" });
+  await waitFor(async () => !!(await stored("RE4"))?.twilio_deleted_at);
+  assert.equal(await normalized("RE4"), true);
+  const playback = Buffer.from(await (await fetch(`${base}/admin/recordings/${loud.id}.mp3`, { headers: { Cookie: admin } })).arrayBuffer());
+  assert.notDeepEqual(playback, quiet);
 });
 
 test("security headers: strict CSP with no inline scripts, no framing, HSTS on HTTPS", { skip: !enabled }, async () => {
