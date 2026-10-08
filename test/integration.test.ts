@@ -1118,7 +1118,7 @@ test("the call still hangs up when GPT-Live keeps streaming silence and noise af
   }
   c.twilioSide.send(JSON.stringify({ event: "mark", streamSid: "MZCAbye3", mark: { name: "hangup" } }));
   // The REST hang-up can't reach Twilio from tests, so this also shows the second path: we end the stream ourselves.
-  await Promise.race([closedByServer, sleep(3000).then(() => assert.fail("the server didn't end the call's audio stream"))]);
+  await Promise.race([closedByServer, sleep(6000).then(() => assert.fail("the server didn't end the call's audio stream"))]);
   assert.ok(c.live.received.some((e) => e.type === "session.close"));
   const conversation = (await db.query("SELECT id FROM conversations WHERE call_sid = 'CAbye3'"))[0];
   const events = (await db.query("SELECT body FROM messages WHERE conversation_id = $1 AND role = 'event'", [conversation.id])).map((r: any) => r.body);
