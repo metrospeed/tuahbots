@@ -78,3 +78,19 @@ test("settings validation keeps the disclosures and sane hours", () => {
   assert.match(validateSettings({ ...DEFAULT_SETTINGS, maxCallMinutes: 0 })!, /time limit/);
   assert.match(validateSettings({ ...DEFAULT_SETTINGS, timezone: "Nowhere/Land" })!, /time zone/);
 });
+
+const { endsWithFarewell, isClosingReply } = await import("../src/voice/goodbye.js");
+
+test("goodbye detection: the agent's farewell at the end of what it said", () => {
+  for (const said of ["Thanks so much, goodbye!", "Great, bye!", "Bye bye.", "Have a great day!", "Okay, take care.", "Thank you, have a nice weekend, Mike!", "Talk to you soon."]) {
+    assert.ok(endsWithFarewell(said), said);
+  }
+  for (const said of ["Before I say goodbye, what's your reference number?", "Could you spell your name?", "Bye the way, is it ready?x not", "I'll take care of that. What time works for you?"]) {
+    assert.ok(!endsWithFarewell(said), said);
+  }
+});
+
+test("goodbye detection: closing replies vs. a new topic", () => {
+  for (const reply of ["Bye!", "Thanks, you too.", "Okay, bye bye", "Thank you so much, have a good day", "mhm"]) assert.ok(isClosingReply(reply), reply);
+  for (const reply of ["Wait, one more thing", "Actually can you also ask about Friday?", "Hold on, the price changed"]) assert.ok(!isClosingReply(reply), reply);
+});
