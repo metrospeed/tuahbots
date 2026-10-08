@@ -21,7 +21,7 @@ import { addMessage, getTask, getUser, query, type User } from "../db/index.js";
 import { twilioClient } from "../twilio.js";
 import { dtmfAudio } from "./dtmf.js";
 import { takeRelaySession, type RelaySession } from "./sessions.js";
-import { endsWithFarewell, isClosingReply } from "./goodbye.js";
+import { GoodbyeWatcher } from "./goodbye.js";
 import { finalizeCall } from "./summary.js";
 import { getSettings } from "../settings.js";
 
@@ -47,8 +47,6 @@ const SPEECH_SETTLE_MS = 800;
 const MAX_GOODBYE_MS = 15_000;
 /** End the call if nobody has spoken for this long. */
 const IDLE_HANGUP_MS = 45_000;
-/** After the agent says goodbye, hang up if the other side adds nothing new within this long. */
-const GOODBYE_GRACE_MS = 3_000;
 
 /**
  * GPT-Live sessions started while Twilio plays the greeting, keyed by the
@@ -141,9 +139,8 @@ class LiveCall {
   private lastOutputAt = 0;
   private lastActivityAt = Date.now();
   private finishing = false;
-  /** When the agent's last words were a goodbye (0 = not waiting to hang up). */
-  private goodbyeAt = 0;
-  private lastUserSpeechAt = 0;
+  /** Hangs up after a goodbye, even if GPT-Live never delegates "hang up". */
+  private goodbye = new GoodbyeWatcher();
 
   constructor(private session: RelaySession) {
     this.grouper.on("segment.updated", (s) => this.upsertSegment(s));
@@ -337,13 +334,16 @@ class LiveCall {
         // Before the stream attaches, the greeting is still playing; drop anything early.
         if (!this.twilio) return;
         this.lastOutputAt = this.lastActivityAt = Date.now();
+        this.goodbye.agentAudio(this.lastOutputAt);
         this.sendTwilio({ event: "media", media: { payload: event.delta } });
         break;
       case "session.input_transcript.delta":
-        this.lastActivityAt = this.lastUserSpeechAt = Date.now();
+        this.lastActivityAt = Date.now();
+        if (this.twilio) this.goodbye.callerSaid(event.delta, this.lastActivityAt);
         if (!this.transcriptDone) this.grouper.push(event);
         break;
       case "session.output_transcript.delta":
+        if (this.twilio) this.goodbye.agentSaid(event.delta, Date.now());
         if (!this.transcriptDone) this.grouper.push(event);
         break;
       case "session.delegation.created":
@@ -382,34 +382,12 @@ class LiveCall {
     const existing = this.transcript.find((l) => l.id === segment.id);
     if (existing) existing.text = segment.text;
     else this.transcript.push(line);
-    this.watchForGoodbye(segment);
-  }
-
-  /**
-   * Hang up after the agent says goodbye, without relying on GPT-Live to
-   * delegate "hang up": once its words end in a farewell, wait a moment; if
-   * the other side only says bye/thanks back (or nothing), finish the call.
-   * Anything else ("wait, one more thing") keeps it going.
-   */
-  private watchForGoodbye(segment: TranscriptSegment): void {
-    if (this.finishing || !this.twilio) return;
-    if (segment.speaker === "assistant") {
-      if (endsWithFarewell(segment.text)) {
-        if (!this.goodbyeAt) this.goodbyeAt = Date.now();
-      } else {
-        this.goodbyeAt = 0; // kept talking after the goodbye
-      }
-      return;
-    }
-    if (this.goodbyeAt && !isClosingReply(segment.text)) this.goodbyeAt = 0;
   }
 
   private checkGoodbye(): void {
-    if (!this.goodbyeAt || this.finishing) return;
-    const now = Date.now();
-    const quietSince = Math.max(this.goodbyeAt, this.lastOutputAt, this.lastUserSpeechAt);
-    if (now - quietSince < GOODBYE_GRACE_MS) return;
-    addMessage(this.session.conversationId, "event", "Agent said goodbye; call ended").catch((err) => this.fail("Saving event failed", err));
+    if (this.finishing || !this.goodbye.isOver(Date.now())) return;
+    const who = this.goodbye.endedBy === "agent" ? "Agent" : "The other side";
+    addMessage(this.session.conversationId, "event", `${who} said goodbye; call ended`).catch((err) => this.fail("Saving event failed", err));
     this.finishAfterSpeech(0);
   }
 

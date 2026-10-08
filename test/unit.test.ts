@@ -111,7 +111,7 @@ test("quiet call recordings are normalized to a comfortable volume", { skip: !ha
   assert.equal(await normalizeRecording(Buffer.alloc(500, 7)), null);
 });
 
-const { endsWithFarewell, isClosingReply } = await import("../src/voice/goodbye.js");
+const { endsWithFarewell, isClosingReply, GoodbyeWatcher, GOODBYE_QUIET_MS, CALLER_GOODBYE_QUIET_MS, ANSWER_WAIT_MS } = await import("../src/voice/goodbye.js");
 
 test("goodbye detection: the agent's farewell at the end of what it said", () => {
   for (const said of ["Thanks so much, goodbye!", "Great, bye!", "Bye bye.", "Have a great day!", "Okay, take care.", "Thank you, have a nice weekend, Mike!", "Talk to you soon."]) {
@@ -156,4 +156,66 @@ test("prompt edits are validated: not empty, not too long, known placeholders, r
   assert.equal(prompts.validatePrompt("userAssistant", 'Reply as JSON like {"ok": true}.'), null, "braces that aren't placeholders are fine");
   assert.equal(prompts.normalizePrompt("  a\r\nb\rc  "), "a\nb\nc");
   assert.equal(prompts.promptDefinition("nope"), undefined);
+});
+
+test("goodbye detection: a farewell followed by a name or 'for now', but not a question", () => {
+  for (const said of ["Goodbye, Mr. Smith!", "Bye for now.", "Okay, bye Tuah", "Thanks, have a good one, Gail."]) assert.ok(endsWithFarewell(said), said);
+  for (const said of ["Goodbye, what's your number?", "Bye, did you get that?", "Take care of the invoice and send it over today please"]) {
+    assert.ok(!endsWithFarewell(said), said);
+  }
+});
+
+test("goodbye watcher: hangs up after the agent's goodbye, whatever the other side answers", () => {
+  // The agent says goodbye; the other side replies with something we don't list as a closing.
+  let w = new GoodbyeWatcher();
+  w.agentSaid("You're welcome, Gail. ", 0);
+  w.agentSaid("Goodbye!", 500);
+  assert.equal(w.isOver(500 + GOODBYE_QUIET_MS - 1), false, "waits for a quiet moment");
+  w.callerSaid("Perfect, thanks for all your help", 1500);
+  assert.equal(w.isOver(1500 + GOODBYE_QUIET_MS), false, "gives the agent a chance to answer");
+  assert.equal(w.isOver(1500 + ANSWER_WAIT_MS), true, "the agent had nothing to add, so the call ends");
+  assert.equal(w.endedBy, "agent");
+
+  // A plain "bye" back only needs the short quiet period.
+  w = new GoodbyeWatcher();
+  w.agentSaid("Okay, bye!", 0);
+  w.callerSaid("Bye.", 800);
+  assert.equal(w.isOver(800 + GOODBYE_QUIET_MS), true);
+
+  // The agent carries on after "wait, one more thing": no hang-up.
+  w = new GoodbyeWatcher();
+  w.agentSaid("Okay, bye!", 0);
+  w.callerSaid("Wait, one more thing, can you also call the plumber?", 800);
+  w.agentSaid("Sure", 2000);
+  w.agentSaid(", what's the plumber's number?", 2200);
+  assert.equal(w.isOver(60_000), false);
+
+  // A goodbye in the middle of a sentence doesn't count once the agent keeps going.
+  w = new GoodbyeWatcher();
+  w.agentSaid("Before I say goodbye", 0);
+  w.agentSaid(", could you spell your last name for me?", 300);
+  assert.equal(w.isOver(60_000), false);
+});
+
+test("goodbye watcher: hangs up when the other side says goodbye and the agent just closes", () => {
+  let w = new GoodbyeWatcher();
+  w.agentSaid("Your appointment is booked for Friday at 3.", 0);
+  w.callerSaid("Great, thank you. Bye!", 1000);
+  w.agentSaid("You too!", 1600);
+  assert.equal(w.isOver(1600 + CALLER_GOODBYE_QUIET_MS - 1), false);
+  assert.equal(w.isOver(1600 + CALLER_GOODBYE_QUIET_MS), true);
+  assert.equal(w.endedBy, "caller");
+
+  // ...but not if the agent answers with more business.
+  w = new GoodbyeWatcher();
+  w.callerSaid("Okay, bye!", 0);
+  w.agentSaid("Before you go, could you confirm the total?", 700);
+  assert.equal(w.isOver(60_000), false);
+
+  // Audio still arriving counts as the agent talking.
+  w = new GoodbyeWatcher();
+  w.agentSaid("Goodbye!", 0);
+  w.agentAudio(2500);
+  assert.equal(w.isOver(GOODBYE_QUIET_MS), false);
+  assert.equal(w.isOver(2500 + GOODBYE_QUIET_MS), true);
 });
