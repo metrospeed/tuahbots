@@ -755,18 +755,20 @@ test("recordings are copied to our database, then deleted from Twilio; failures 
   assert.equal((await stored("RE3")).size, 800);
   assert.ok(!twilioRecordings.has("RE3"));
 
-  // Audio ffmpeg can't decode is kept as it came from Twilio.
+  // Without ffmpeg, recordings are kept as is and left for a later normalize attempt.
   const normalized = async (sid: string) => (await db.query("SELECT normalized FROM recordings WHERE recording_sid = $1", [sid]))[0]?.normalized;
-  assert.equal(await normalized("RE1"), false);
-
-  // A real (quiet) recording is stored volume-normalized.
   const { execFileSync } = await import("node:child_process");
   let quiet: Buffer;
   try {
     quiet = execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=400:d=3,volume=0.03", "-ar", "8000", "-ac", "1", "-b:a", "32k", "-f", "mp3", "pipe:1"]);
   } catch {
-    return; // ffmpeg not installed here
+    assert.equal(await normalized("RE1"), null);
+    return;
   }
+  // Audio ffmpeg can't decode is kept as it came from Twilio.
+  assert.equal(await normalized("RE1"), false);
+
+  // A real (quiet) recording is stored volume-normalized.
   const loud = (
     await db.query("INSERT INTO conversations (kind, counterpart_phone, direction, call_sid) VALUES ('task_call', '+14155550403', 'outbound', 'CArec4') RETURNING id")
   )[0];
