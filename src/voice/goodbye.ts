@@ -4,33 +4,41 @@
  */
 
 // Common farewells, then at most two short words ("Goodbye, Mr. Smith!", "Bye for now.").
+// "Take care of it" is a promise, not a goodbye ("take care of yourself" is one).
 const FAREWELL_AT_END = new RegExp(
-  String.raw`\b(good-?\s?bye|bye(?:[- ]bye)?|bye now|take care|talk (?:to you )?(?:soon|later)|` +
-    String.raw`have an? (?:great|good|nice|wonderful|lovely|fantastic) (?:day|one|night|evening|afternoon|morning|weekend|rest of your day))` +
+  String.raw`\b(good-?\s?bye|bye(?:[- ]bye)?|bye now|take care(?!\s+of\b(?!\s+your?sel(?:f|ves)\b))|talk (?:to you )?(?:soon|later)|` +
+    String.raw`have an? (?:great|good|nice|wonderful|lovely|fantastic) (?:day|one|night|evening|afternoon|morning|weekend|rest of (?:your|the) (?:day|evening|afternoon|night|weekend|week)))` +
     String.raw`\b[\s.!,…]*(?:[^\s?]{1,12}[\s.!,…]*){0,2}$`,
   "i",
 );
 
 // Farewells that are also ordinary phrases ("Saturday is a good night", "all the best
-// reviews", "see you later today"): they only count at the very end, or followed by
-// a name or "too"/"now"/"then"/"to you".
+// reviews", "see you later today"): they count only at the start of a sentence or
+// after a closing word, and only at the very end or followed by a name or
+// "too"/"now"/"then"/"to you".
 const PLAIN_FAREWELL_AT_END = new RegExp(
-  String.raw`(?<!\b(?:a|the|is|was|be|very|really|such)\s)\b(good ?night|all the best|see you (?:later|soon|then)|` +
+  String.raw`\b(good ?night|all the best|see you (?:later|soon|then)|` +
     String.raw`have an? (?:great|good|nice|wonderful|lovely|fantastic) week|` +
     String.raw`enjoy (?:the |your )?(?:day|evening|afternoon|weekend|week|rest of (?:your|the) (?:day|evening|afternoon|weekend|week)))` +
     String.raw`\b((?:[\s,]+[^\s!,…?']+){0,2})[\s.!,…]*$`,
   "i",
 );
 const AFTER_PLAIN_FAREWELL = new Set(["too", "now", "then", "to", "you"]);
+const BEFORE_PLAIN_FAREWELL = /(?:^|[.!,…;:]|\b(?:okay|ok|alright|all right|thanks|thank you|you too|and|well|so|great|perfect|bye))$/i;
+// Passing a message on is not saying goodbye: "I'll tell her good night", "say bye to him for me".
+const RELAYED = /\b(?:tell|tells|told|telling|say|says|said|saying|text|texting|wish|wishes|wishing|message|send|sending|remind|give)\b(?:\s+(?:her|him|them|you|me|us|everyone|my \w+|your \w+))?\s*$/i;
 
 /** The words end with a goodbye ("…Thanks so much, bye!"). */
 export function endsWithFarewell(text: string): boolean {
   // Only the tail counts: "before I say goodbye, one more thing" is not a goodbye.
   const tail = text.trim().slice(-80);
   if (tail.endsWith("?")) return false;
-  if (FAREWELL_AT_END.test(tail)) return true;
+  const common = FAREWELL_AT_END.exec(tail);
+  if (common) return !RELAYED.test(tail.slice(0, common.index));
   const plain = PLAIN_FAREWELL_AT_END.exec(tail);
   if (!plain) return false;
+  const before = tail.slice(0, plain.index).trimEnd();
+  if (!BEFORE_PLAIN_FAREWELL.test(before) || RELAYED.test(before)) return false;
   const after = plain[2].split(/[\s,]+/).filter(Boolean);
   // Only a name (capitalized) or a closing word may follow.
   return after.every((w) => AFTER_PLAIN_FAREWELL.has(w.replace(/\.$/, "").toLowerCase()) || /^\p{Lu}/u.test(w));
@@ -51,6 +59,14 @@ export function isClosingReply(text: string): boolean {
 /** Whether a transcript fragment has any words in it (line noise often comes through as "." or "…"). */
 export function hasWords(text: string): boolean {
   return /[\p{L}\p{N}]/u.test(text);
+}
+
+/** A goodbye said while handing the call on ("I'll transfer you now, have a great day!") doesn't end it. */
+const HANDOFF = /\b(?:transfer\w*|put(?:ting)? you (?:through|on hold)|connect(?:ing)? you|hold (?:on|the line|please)|please hold|one moment|just a (?:moment|sec(?:ond)?))\b/i;
+
+/** The last few words, to judge what someone just said rather than everything since they started. */
+function lastWords(text: string, n: number): string {
+  return (text.match(/[\p{L}\p{N}'’-]+/gu) ?? []).slice(-n).join(" ");
 }
 
 /** After the agent says goodbye, hang up once the line has been quiet this long. */
@@ -103,6 +119,8 @@ export class GoodbyeWatcher {
   private callerBye = false;
   /** After the agent's goodbye the other side said something more; the agent hasn't answered yet ("Mhm" doesn't count). */
   private answerOwed = false;
+  /** When the agent last said a farewell. */
+  private agentFarewellAt = -Infinity;
   /** When the goodbye became pending; pushed back when the other side adds something. */
   private byeAt: number | null = null;
   /** When the goodbye first became pending; never pushed back. */
@@ -122,6 +140,7 @@ export class GoodbyeWatcher {
     if (endsWithFarewell(this.agentText)) {
       this.agentBye = true;
       this.answerOwed = false;
+      this.agentFarewellAt = now;
       this.pending(now);
     } else if (this.byeAt === null || !isClosingReply(this.agentTurn)) {
       // The agent carried on (or is part-way through a sentence); nothing is pending.
@@ -149,12 +168,16 @@ export class GoodbyeWatcher {
       }
       return;
     }
-    this.lastSpeechAt = this.lastCallerWordsAt = now;
-    const farewell = endsWithFarewell(this.callerTurn);
+    this.lastSpeechAt = now;
+    const farewell = endsWithFarewell(this.callerTurn) && !HANDOFF.test(this.callerTurn);
     // Something substantive ("wait, can you also tell her good night"): a later farewell
     // from the agent must come after it, and a pending goodbye waits for the agent's answer.
-    const substantive = !isClosingReply(this.callerTurn);
-    if (substantive) this.agentText = "";
+    // Judged on the latest words, so a string of "Okay." from a noisy line stays a closing.
+    const substantive = !isClosingReply(lastWords(this.callerTurn, 4));
+    if (substantive) {
+      this.agentText = "";
+      this.lastCallerWordsAt = now;
+    }
     if (farewell) {
       this.callerBye = true;
       this.pending(now);
@@ -174,6 +197,21 @@ export class GoodbyeWatcher {
   /** The agent's audible audio is still arriving (it can trail the transcript). */
   agentAudio(now: number): void {
     this.lastSpeechAt = Math.max(this.lastSpeechAt, now);
+  }
+
+  /**
+   * The conversation is still going on behind the scenes (a task the agent was
+   * working on just finished): restart the goodbye timers so the agent can
+   * relay the result before a pending goodbye ends the call.
+   */
+  extend(now: number): void {
+    this.lastSpeechAt = Math.max(this.lastSpeechAt, now);
+    if (this.byeAt !== null) this.byeAt = this.firstByeAt = now;
+  }
+
+  /** Whether the agent has said a farewell since `since`. */
+  agentSaidGoodbyeSince(since: number): boolean {
+    return this.agentFarewellAt >= since;
   }
 
   /** True once a goodbye has been said and the line has gone quiet, or a time limit has passed. */

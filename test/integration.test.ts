@@ -14,10 +14,12 @@ const enabled = !!process.env.TEST_DATABASE_URL;
 // the app's failure handling is exercised too. Responses API requests are kept
 // so tests can check the instructions the app sent.
 const openAIRequests: any[] = [];
+/** Tests can make the agent model slow, or answer a call's delegation with text instead of end_call. */
+const fakeAgent = { delayMs: 0, reply: null as string | null };
 const fakeOpenAI = http.createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
-  req.on("end", () => {
+  req.on("end", () => setTimeout(() => {
     const request = JSON.parse(body || "{}");
     openAIRequests.push(request);
     const tools: string[] = (request.tools ?? []).map((t: any) => t.name);
@@ -26,8 +28,9 @@ const fakeOpenAI = http.createServer((req, res) => {
     const unknown = unknownInputField(request);
     if (unknown) return rejectUnknown(res, unknown);
     if (!tools.includes("end_call")) return void res.writeHead(400).end(JSON.stringify({ error: { message: "test" } }));
+    if (fakeAgent.reply !== null) return sendResponseStream(res, request.model, [textMessage(fakeAgent.reply)]);
     sendResponseStream(res, request.model, answered ? [textMessage("Ending the call.")] : [functionCall("end_call", { reason: "done" })]);
-  });
+  }, fakeAgent.delayMs));
 });
 const fakeLive = new WebSocketServer({ server: fakeOpenAI });
 
@@ -1123,4 +1126,29 @@ test("the call still hangs up when GPT-Live keeps streaming silence and noise af
   const conversation = (await db.query("SELECT id FROM conversations WHERE call_sid = 'CAbye3'"))[0];
   const events = (await db.query("SELECT body FROM messages WHERE conversation_id = $1 AND role = 'event'", [conversation.id])).map((r: any) => r.body);
   assert.ok(events.includes("Agent said goodbye; hanging up"), events.join(" | "));
+});
+
+test("a goodbye said while the agent is still working on a request doesn't end the call until the result is in", { skip: !enabled }, async () => {
+  await db.query("INSERT INTO users (name, phone) VALUES ('Ed Errand', '+14155550779') ON CONFLICT (phone) DO NOTHING");
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  fakeAgent.delayMs = 6000;
+  fakeAgent.reply = "Done: I called the dentist and moved the cleaning to Friday.";
+  try {
+    const d = await startLiveCall("+14155550779", "CAbye4");
+    d.send({ type: "session.input_transcript.delta", event_id: "d1", delta: "Move my cleaning to Friday, thanks, bye!", start_ms: 1000, end_ms: 2000 });
+    d.send({ type: "session.output_transcript.delta", event_id: "d2", delta: "Will do, bye!", start_ms: 2100, end_ms: 2600 });
+    d.send({ type: "session.delegation.created", event_id: "d3", offset_ms: 2700, delegation: { id: "del_errand", target: "client", type: "delegation" } });
+    await sleep(5000);
+    assert.ok(!d.toCaller.some((m) => m.event === "mark"), "no hang-up while the request is being handled");
+    // The result reaches GPT-Live to relay; if it then stays quiet, the call ends.
+    for (let i = 0; i < 40 && !d.live.received.some((e) => e.type === "session.commentary.append" && e.delegation_id === "del_errand"); i++) await sleep(100);
+    assert.ok(d.live.received.some((e) => e.type === "session.commentary.append" && e.delegation_id === "del_errand"), "result relayed");
+    let mark: any;
+    for (let i = 0; i < 80 && !(mark = d.toCaller.find((m) => m.event === "mark")); i++) await sleep(100);
+    assert.equal(mark?.mark.name, "hangup");
+    d.twilioSide.close();
+  } finally {
+    fakeAgent.delayMs = 0;
+    fakeAgent.reply = null;
+  }
 });

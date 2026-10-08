@@ -370,3 +370,47 @@ test("silent μ-law audio isn't counted as speech", () => {
   assert.equal(isAudibleMulaw(sine(408)), true, "a soft consonant");
   assert.equal(isAudibleMulaw(sine(1500)), true, "quiet speech");
 });
+
+test("goodbye detection: promises and passed-on messages aren't goodbyes", () => {
+  for (const said of [
+    "Okay, I'll take care of it.",
+    "Let me take care of that.",
+    "Sure, I'll text her good night.",
+    "Okay, I'll tell him see you soon.",
+    "I'll wish them all the best.",
+    "I'll tell her goodbye for you.",
+    "Call my mom and tell her good night.",
+  ]) {
+    assert.ok(!endsWithFarewell(said), said);
+  }
+  for (const said of ["Take care of yourself!", "Have a wonderful rest of your evening!", "Have a great rest of your week!", "Thanks, good night!", "I hope you have a great day!"]) {
+    assert.ok(endsWithFarewell(said), said);
+  }
+});
+
+test("goodbye watcher: the other side handing the call on isn't a goodbye", () => {
+  const w = new GoodbyeWatcher();
+  w.callerSaid("Okay, I'm going to transfer you to billing now. Have a great day!", 0);
+  w.agentSaid("Thank you so much!", 1000);
+  assert.equal(w.isOver(60_000), false);
+});
+
+test("goodbye watcher: a noisy line repeating closings doesn't stretch the wait", () => {
+  const w = new GoodbyeWatcher();
+  w.agentSaid("All set. Goodbye!", 0);
+  for (let t = 1000; t <= 20_000; t += 1000) w.callerSaid("Okay.", t);
+  assert.equal(w.isOver(GOODBYE_MAX_WAIT_MS), true, "the cap from the goodbye still applies");
+});
+
+test("goodbye watcher: extend() restarts the timers for a result the agent still has to relay", () => {
+  const w = new GoodbyeWatcher();
+  w.agentSaid("Will do, bye!", 0);
+  assert.ok(w.agentSaidGoodbyeSince(0));
+  assert.equal(w.agentSaidGoodbyeSince(1), false);
+  w.extend(20_000); // a slow errand just finished
+  assert.equal(w.isOver(20_000 + GOODBYE_QUIET_MS - 1), false);
+  w.agentSaid("Done, they moved it to Friday.", 21_000);
+  assert.equal(w.isOver(60_000), false, "the agent carried on");
+  w.agentSaid(" Bye!", 22_000);
+  assert.equal(w.isOver(22_000 + GOODBYE_QUIET_MS), true);
+});

@@ -45,8 +45,14 @@ const PREWARM_TTL_MS = 90_000;
 const SPEECH_SETTLE_MS = 800;
 /** Upper bound on waiting for a goodbye to finish before hanging up anyway. */
 const MAX_GOODBYE_MS = 15_000;
-/** When GPT-Live is asked to say goodbye but stays silent, hang up after this long anyway. */
+/** When GPT-Live is asked to say goodbye but doesn't (and goes quiet), hang up after this much silence anyway. */
 const SILENT_GOODBYE_MS = 8_000;
+/** Upper bound on waiting for GPT-Live to say a goodbye it was asked for. */
+const MAX_ASKED_GOODBYE_MS = 20_000;
+/** After the goodbye watcher fires, the agent is done; don't wait long for audible noise to stop. */
+const MAX_AFTER_GOODBYE_MS = 8_000;
+/** A goodbye never ends the call while the agent is doing something for the caller, unless that takes longer than this. */
+const DELEGATION_HOLD_MAX_MS = 60_000;
 /** If the mark never comes back, hang up anyway after this long. */
 const MARK_TIMEOUT_MS = 8_000;
 /** How long the REST hang-up gets before we also end the call's audio stream. */
@@ -153,6 +159,10 @@ class LiveCall {
   private goodbye = new GoodbyeWatcher();
   /** Hold music or someone talking on the other end keeps the idle hang-up away. */
   private lineSound = new LineSound();
+  private lastLineSoundAt = 0;
+  /** Tasks the agent backend is working on for the call, and when the current one started. */
+  private delegationsInFlight = 0;
+  private delegationStartedAt = 0;
 
   constructor(private session: RelaySession) {
     this.grouper.on("segment.updated", (s) => this.upsertSegment(s));
@@ -215,10 +225,12 @@ class LiveCall {
     this.timers.push(
       setInterval(() => this.checkGoodbye(), 250),
       setInterval(() => {
-        const idleLimit = this.session.mode === "task" ? TASK_IDLE_HANGUP_MS : IDLE_HANGUP_MS;
+        // Sound on the line with no words (hold music, a TV) stretches a user call's idle limit, but not forever.
+        const lineBusy = Date.now() - this.lastLineSoundAt < 5000;
+        const idleLimit = this.session.mode === "task" || lineBusy ? TASK_IDLE_HANGUP_MS : IDLE_HANGUP_MS;
         if (Date.now() - this.lastActivityAt < idleLimit || this.finishing) return;
         this.instruct("Nobody has said anything for a while. Say a brief goodbye.");
-        this.finishAfterSpeech(true);
+        this.finishAfterSpeech(true, MAX_ASKED_GOODBYE_MS);
       }, 5000),
     );
     if (this.hangUpWhenAttached) this.hangUp();
@@ -248,7 +260,7 @@ class LiveCall {
     this.timers.push(
       setTimeout(() => {
         this.instruct("The call has reached its time limit. Tell the other person you have to go and say goodbye now, briefly.");
-        this.finishAfterSpeech(true);
+        this.finishAfterSpeech(true, MAX_ASKED_GOODBYE_MS);
       }, maxCallMinutes * 60 * 1000),
     );
     await this.ready;
@@ -271,7 +283,11 @@ class LiveCall {
     switch (msg.event) {
       case "media":
         if (msg.media?.track === "outbound" || this.hangingUp) return;
-        if (this.lineSound.frame(Buffer.from(msg.media!.payload, "base64"))) this.lastActivityAt = Date.now();
+        if (this.lineSound.frame(Buffer.from(msg.media!.payload, "base64"))) {
+          this.lastLineSoundAt = Date.now();
+          // On calls placed for a task, hold music can go on for a while; the call's time limit still applies.
+          if (this.session.mode === "task") this.lastActivityAt = this.lastLineSoundAt;
+        }
         if (this.liveReady) this.live!.send({ type: "session.input_audio.append", audio: msg.media!.payload });
         else if (this.pendingAudio.length < MAX_PENDING_FRAMES) this.pendingAudio.push(msg.media!.payload);
         break;
@@ -414,11 +430,14 @@ class LiveCall {
   }
 
   private checkGoodbye(): void {
-    if (this.finishing || !this.goodbye.isOver(Date.now())) return;
+    if (this.finishing) return;
+    // "Okay, I'll take care of it" while the backend works must never cancel the errand.
+    if (this.delegationsInFlight > 0 && Date.now() - this.delegationStartedAt < DELEGATION_HOLD_MAX_MS) return;
+    if (!this.goodbye.isOver(Date.now())) return;
     const who = this.goodbye.endedBy === "agent" ? "Agent" : "The other side";
     console.log(`Call ${this.callSid}: ${who.toLowerCase()} said goodbye; hanging up`);
     addMessage(this.session.conversationId, "event", `${who} said goodbye; hanging up`).catch((err) => this.fail("Saving event failed", err));
-    this.finishAfterSpeech(false);
+    this.finishAfterSpeech(false, MAX_AFTER_GOODBYE_MS);
   }
 
   private saveSegment(segment: TranscriptSegment): void {
@@ -446,8 +465,17 @@ class LiveCall {
   }
 
   private queueDelegation(delegationId: string): void {
+    if (this.delegationsInFlight++ === 0) this.delegationStartedAt = Date.now();
     // One at a time, so results land in the transcript in order.
-    this.delegations = this.delegations.then(() => this.runDelegation(delegationId)).catch((err) => this.fail("Delegation failed", err));
+    this.delegations = this.delegations
+      .then(() => this.runDelegation(delegationId))
+      .catch((err) => this.fail("Delegation failed", err))
+      .finally(() => {
+        this.delegationsInFlight--;
+        this.delegationStartedAt = Date.now();
+        // Give the agent time to relay the result before a pending goodbye ends the call.
+        this.goodbye.extend(Date.now());
+      });
   }
 
   private async runDelegation(delegationId: string): Promise<void> {
@@ -489,7 +517,7 @@ class LiveCall {
         });
       }
       await addMessage(s.conversationId, "event", "Agent ended the call");
-      this.finishAfterSpeech(false);
+      this.finishAfterSpeech(false, MAX_GOODBYE_MS);
       return;
     }
     this.transcript.push({ id: `delegation-${delegationId}`, speaker: "Backend result", text: result });
@@ -504,22 +532,24 @@ class LiveCall {
    * Hang up once the agent has finished talking: wait until its audible audio
    * has stopped briefly, then send Twilio a mark, which comes back when
    * everything queued before it has actually played to the caller.
-   * `expectGoodbye`: GPT-Live has just been asked to say goodbye, so first wait
-   * for it to start talking (or give up after SILENT_GOODBYE_MS).
+   * `expectGoodbye`: GPT-Live has just been asked to say goodbye, so wait for
+   * it to say one (it may be mid-sentence first), or for it to go quiet for
+   * SILENT_GOODBYE_MS without one. `maxMs`: hang up regardless after this long.
    */
-  private finishAfterSpeech(expectGoodbye: boolean): void {
+  private finishAfterSpeech(expectGoodbye: boolean, maxMs: number): void {
     if (this.finishing) return;
     this.finishing = true;
     const startedAt = Date.now();
     const poll = setInterval(() => {
       const now = Date.now();
-      const elapsed = now - startedAt;
       const settled = now - this.lastOutputAt >= SPEECH_SETTLE_MS;
-      const spoke = this.lastOutputAt > startedAt;
-      if (elapsed >= MAX_GOODBYE_MS) {
+      const ready = expectGoodbye
+        ? (this.goodbye.agentSaidGoodbyeSince(startedAt) && settled) || now - Math.max(startedAt, this.lastOutputAt) >= SILENT_GOODBYE_MS
+        : settled;
+      if (now - startedAt >= maxMs) {
         clearInterval(poll);
         this.hangUp();
-      } else if (expectGoodbye ? (spoke && settled) || (!spoke && elapsed >= SILENT_GOODBYE_MS) : settled) {
+      } else if (ready) {
         clearInterval(poll);
         this.sendTwilio({ event: "mark", mark: { name: "hangup" } });
         // If the mark never comes back, still hang up.
