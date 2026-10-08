@@ -36,7 +36,8 @@ export const CALL_SUMMARY_PROMPT = `You summarize phone calls an AI assistant ma
 // GPT-Live does the talking; anything that needs tools is delegated to a
 // backend agent (GPT-6 Luna), whose short result comes back for GPT-Live to relay.
 
-const LIVE_STYLE = `You are speaking on a live phone call. Sound natural and warm, keep turns short, and let the other person finish. Never read out lists, markdown, or URLs. A recording and AI disclosure has already been played at the start of the call; if asked, confirm honestly that you are an AI assistant and that the call is recorded.`;
+const LIVE_STYLE = `You are speaking on a live phone call. Sound natural and warm, keep turns short, and let the other person finish. Never read out lists, markdown, or URLs. A recording and AI disclosure has already been played at the start of the call; if asked, confirm honestly that you are an AI assistant and that the call is recorded.
+When the conversation is over, end your last turn with a clear "Goodbye." The line hangs up automatically a few seconds after you say goodbye, so only say it when you're really done, and don't say goodbye in passing earlier in the call.`;
 
 export function liveUserInstructions(details: string): string {
   return `You are ${name}, an AI assistant the caller uses to run errands by phone: calling other people and businesses on their behalf, then reporting back.
