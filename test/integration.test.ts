@@ -527,8 +527,14 @@ test("admin settings control greetings, hours, time limit and the calls switch",
 
   assert.equal((await form(valid)).status, 302);
   const page = await (await fetch(`${base}/admin/settings`, { headers: { Cookie: cookie } })).text();
-  assert.match(page, /America\/Chicago/);
+  assert.match(page, /<option value="America\/Chicago" selected>/);
   assert.match(page, /value="5"/);
+
+  // The saved time zone drives admin dates and the agent's clock.
+  const { fmtDate } = await import("../src/admin/views.js");
+  const { nowLine } = await import("../src/agent/context.js");
+  assert.match(fmtDate(new Date("2026-01-15T18:00:00Z")), /12:00\s?PM/);
+  assert.match(nowLine(), /\(America\/Chicago\)/);
 
   // The custom greeting is what Twilio plays to an invited caller.
   const call = await (await twilioPost("/twilio/voice", { From: "+14155552671", CallSid: "CAgreet" })).text();
