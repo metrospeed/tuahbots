@@ -21,6 +21,7 @@ import { dropPrewarmedCall } from "../voice/live.js";
 import { finalizeCall } from "../voice/summary.js";
 import { sayAndHangup } from "../voice/twiml.js";
 import { fillGreeting, getSettings } from "../settings.js";
+import { loadPromptOverrides } from "../agent/prompts.js";
 
 export const voiceRouter = express.Router();
 
@@ -38,6 +39,8 @@ voiceRouter.post("/twilio/voice", requireTwilioSignature, async (req, res) => {
 
 async function inboundCallTwiml(from: string, callSid: string): Promise<string> {
   const settings = await getSettings();
+  // Pick up prompt edits saved elsewhere before this call's agent is set up.
+  await loadPromptOverrides();
   const user = await findActiveUserByPhone(from);
   if (user) {
     const conversation = await createConversation({ kind: "user_call", userId: user.id, counterpartPhone: from, direction: "inbound", callSid });
@@ -97,6 +100,7 @@ voiceRouter.post("/twilio/voice/answered/:conversationId", requireTwilioSignatur
       await addMessage(conversation.id, "event", "Call answered after calls were turned off or the task was cancelled; hung up");
       return void res.type("text/xml").send("<Response><Hangup/></Response>");
     }
+    await loadPromptOverrides();
     const greeting = fillGreeting(settings.greetingOutbound, {
       agent: config.agent.name,
       requester: requester.name,
