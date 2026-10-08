@@ -8,15 +8,44 @@
 
   const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
 
+  const svg = (d) => {
+    const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("class", "i"); s.setAttribute("aria-hidden", "true");
+    const p = document.createElementNS("http://www.w3.org/2000/svg", "path"); p.setAttribute("d", d); s.append(p);
+    return s;
+  };
+  const PHONE = "M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2";
+  // Avatar: up to two initials, or a phone icon when the name is just a number.
+  const avatar = (s) => {
+    const a = el("span", "avatar");
+    if (/\p{L}/u.test(s)) a.textContent = s.replace(/[^\p{L}\p{N} ]/gu, "").trim().split(/\s+/).slice(0, 2).map((w) => (w[0] || "").toUpperCase()).join("");
+    else a.append(svg(PHONE));
+    return a;
+  };
+
+  // Starter prompts on an empty chat. Clicking one fills the box so it can be edited before sending.
+  const IDEAS = [
+    ["Follow up on a quote", "Call (555) 123-4567, that's Mike at Acme Roofing. Ask for the status of the quote I attached and whether they can start before the 20th."],
+    ["Book an appointment", "Call my dentist at (555) 987-6543 and book a cleaning for any weekday morning next week."],
+    ["Check store hours", "Call the hardware store at (555) 222-0199 and ask if they're open Sunday and whether they have 2x4s in stock."],
+  ];
+
   function showEmpty() {
     if (log.children.length) return;
     const e = el("div", "empty");
-    const hi = el("p");
-    hi.append(el("b", null, "Hi " + FIRST + "!"), " I can phone people and businesses for you and report back here.");
+    const mark = el("span", "mark"); mark.append(svg(PHONE));
+    const ideas = el("div", "ideas");
+    for (const [title, prompt] of IDEAS) {
+      const b = el("button", "idea"); b.type = "button";
+      b.append(el("b", null, title), el("span", null, prompt));
+      b.onclick = () => { text.value = prompt; text.dispatchEvent(new Event("input")); text.focus(); };
+      ideas.append(b);
+    }
     e.append(
-      hi,
-      el("p", null, "Try: “Call (555) 123-4567, that's Mike at Acme Roofing. Ask for the status of this quote and whether they can start before the 20th,” and attach a photo of the quote."),
-      el("p", null, "Calls start by saying I'm an AI assistant and that the call is recorded."),
+      mark,
+      el("h2", null, "Hi " + FIRST + ", who should I call?"),
+      el("p", null, "I can phone people and businesses for you and report back here. Attach a photo or PDF and I'll use it on the call."),
+      ideas,
     );
     e.id = "empty";
     log.append(e);
@@ -24,23 +53,26 @@
 
   function addMessage(m) {
     document.getElementById("empty")?.remove();
+    const row = el("div", "row " + m.role);
     const bubble = el("div", "msg " + m.role, m.body);
+    if (m.role === "assistant") { const av = el("span", "avatar"); av.append(svg(PHONE)); row.append(av); }
     for (const f of m.files) {
       if (f.type.startsWith("image/")) {
         const a = el("a"); a.href = "/app/files/" + f.id; a.target = "_blank";
         const img = el("img"); img.src = a.href; img.alt = "Attached photo"; a.append(img); bubble.append(a);
       } else {
-        const a = el("a", null, "📄 Attached " + (f.type === "application/pdf" ? "PDF" : "file")); a.href = "/app/files/" + f.id; a.target = "_blank";
+        const a = el("a", "file", "📄 Attached " + (f.type === "application/pdf" ? "PDF" : "file")); a.href = "/app/files/" + f.id; a.target = "_blank";
         bubble.append(el("br"), a);
       }
     }
     bubble.append(el("span", "time", m.time));
-    log.append(bubble);
+    row.append(bubble);
+    log.append(row);
   }
 
   function renderTasks(tasks) {
     const list = document.getElementById("taskList");
-    document.getElementById("tasksHeading").textContent = tasks.length ? "Calls & numbers (" + tasks.length + ")" : "Calls & numbers";
+    document.getElementById("tasksHeading").textContent = "Calls & numbers";
     const badge = document.getElementById("menuBadge");
     badge.textContent = tasks.length > 99 ? "99+" : String(tasks.length);
     badge.hidden = !tasks.length;
@@ -49,7 +81,8 @@
     for (const t of tasks) {
       const a = el("a", "task"); a.href = "/app/tasks/" + t.id;
       const top = el("div", "top"); top.append(el("span", null, t.who), el("span", "pill " + t.status, t.status.replace("_", " ")));
-      a.append(top, el("div", "obj", t.objective), el("div", "muted", t.time));
+      const body = el("div", "body"); body.append(top, el("div", "obj", t.objective), el("div", "when", t.time));
+      a.append(avatar(t.who), body);
       list.append(a);
     }
   }
@@ -141,7 +174,12 @@
 
   function setTyping(on) {
     document.getElementById("typing")?.remove();
-    if (on) { const t = el("div", "typing", AGENT + " is working on it…"); t.id = "typing"; log.append(t); }
+    if (on) {
+      const t = el("div", "typing"); t.id = "typing";
+      const dots = el("span", "dots"); dots.append(el("i"), el("i"), el("i"));
+      t.append(dots, AGENT + " is working on it…");
+      log.append(t);
+    }
   }
 
   async function poll() {
