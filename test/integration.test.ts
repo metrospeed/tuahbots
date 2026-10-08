@@ -1096,3 +1096,31 @@ test("the call hangs up after the agent says goodbye, even without a hang-up del
   assert.ok(!b.toCaller.some((m) => m.event === "mark"), "no hang-up while the caller is still talking business");
   b.twilioSide.close();
 });
+
+test("the call still hangs up when GPT-Live keeps streaming silence and noise after the goodbye", { skip: !enabled }, async () => {
+  await db.query("INSERT INTO users (name, phone) VALUES ('Sam Silence', '+14155550778') ON CONFLICT (phone) DO NOTHING");
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const c = await startLiveCall("+14155550778", "CAbye3");
+  const closedByServer = new Promise<void>((resolve) => c.twilioSide.on("close", () => resolve()));
+  c.send({ type: "session.output_transcript.delta", event_id: "c1", delta: "All set, Sam. Goodbye!", start_ms: 1000, end_ms: 2000 });
+  // Silent 20 ms frames, as a full-duplex model streams between turns, plus line noise transcribed as text.
+  const silence = Buffer.alloc(160, 0xff).toString("base64");
+  const stream = setInterval(() => c.send({ type: "session.output_audio.delta", delta: silence }), 20);
+  let n = 0;
+  const noise = setInterval(() => c.send({ type: "session.input_transcript.delta", event_id: `noise${n++}`, delta: ".", start_ms: 3000 + n, end_ms: 3001 + n }), 700);
+  try {
+    let mark: any;
+    for (let i = 0; i < 100 && !(mark = c.toCaller.find((m) => m.event === "mark")); i++) await sleep(100);
+    assert.equal(mark?.mark.name, "hangup", "asks Twilio to report when the goodbye has played");
+  } finally {
+    clearInterval(stream);
+    clearInterval(noise);
+  }
+  c.twilioSide.send(JSON.stringify({ event: "mark", streamSid: "MZCAbye3", mark: { name: "hangup" } }));
+  // The REST hang-up can't reach Twilio from tests, so this also shows the second path: we end the stream ourselves.
+  await Promise.race([closedByServer, sleep(3000).then(() => assert.fail("the server didn't end the call's audio stream"))]);
+  assert.ok(c.live.received.some((e) => e.type === "session.close"));
+  const conversation = (await db.query("SELECT id FROM conversations WHERE call_sid = 'CAbye3'"))[0];
+  const events = (await db.query("SELECT body FROM messages WHERE conversation_id = $1 AND role = 'event'", [conversation.id])).map((r: any) => r.body);
+  assert.ok(events.includes("Agent said goodbye; hanging up"), events.join(" | "));
+});

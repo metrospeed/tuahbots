@@ -111,7 +111,18 @@ test("quiet call recordings are normalized to a comfortable volume", { skip: !ha
   assert.equal(await normalizeRecording(Buffer.alloc(500, 7)), null);
 });
 
-const { endsWithFarewell, isClosingReply, GoodbyeWatcher, GOODBYE_QUIET_MS, CALLER_GOODBYE_QUIET_MS, ANSWER_WAIT_MS } = await import("../src/voice/goodbye.js");
+const {
+  endsWithFarewell,
+  isClosingReply,
+  isAudibleMulaw,
+  GoodbyeWatcher,
+  GOODBYE_QUIET_MS,
+  CALLER_GOODBYE_QUIET_MS,
+  ANSWER_WAIT_MS,
+  GOODBYE_MAX_WAIT_MS,
+  CALLER_GOODBYE_MAX_WAIT_MS,
+  GOODBYE_ABSOLUTE_MAX_MS,
+} = await import("../src/voice/goodbye.js");
 
 test("goodbye detection: the agent's farewell at the end of what it said", () => {
   for (const said of ["Thanks so much, goodbye!", "Great, bye!", "Bye bye.", "Have a great day!", "Okay, take care.", "Thank you, have a nice weekend, Mike!", "Talk to you soon."]) {
@@ -218,4 +229,77 @@ test("goodbye watcher: hangs up when the other side says goodbye and the agent j
   w.agentAudio(2500);
   assert.equal(w.isOver(GOODBYE_QUIET_MS), false);
   assert.equal(w.isOver(2500 + GOODBYE_QUIET_MS), true);
+});
+
+test("goodbye detection: more everyday farewells, without matching ordinary requests", () => {
+  for (const said of ["Enjoy the rest of your day!", "See you later!", "Have a great week!", "Good night!", "All the best!", "Enjoy your weekend, Pat."]) {
+    assert.ok(endsWithFarewell(said), said);
+  }
+  for (const said of ["I'll see you Friday at 3", "Can I have one.", "Have a look at the invoice.", "Take care of the invoice please"]) assert.ok(!endsWithFarewell(said), said);
+});
+
+test("goodbye watcher: silent audio, empty fragments and line noise can't keep a finished call open", () => {
+  // GPT-Live keeps streaming after the goodbye: whatever arrives, the call ends within the cap.
+  let w = new GoodbyeWatcher();
+  w.agentSaid("Thanks, Gail. Goodbye!", 1000);
+  for (let t = 1000; t <= 1000 + GOODBYE_MAX_WAIT_MS; t += 20) {
+    w.agentAudio(t); // even if it counted as audible
+    if (t % 1000 === 0) w.agentSaid("", t);
+    if (t % 500 === 0) w.callerSaid(" ", t);
+  }
+  assert.equal(w.isOver(1000 + GOODBYE_MAX_WAIT_MS), true);
+
+  // Noise transcribed as punctuation isn't speech at all.
+  w = new GoodbyeWatcher();
+  w.agentSaid("Goodbye!", 0);
+  for (let t = 500; t < GOODBYE_QUIET_MS; t += 500) w.callerSaid("…", t);
+  assert.equal(w.isOver(GOODBYE_QUIET_MS), true);
+
+  // Noise transcribed as words keeps pushing the wait back, but only up to the absolute limit.
+  w = new GoodbyeWatcher();
+  w.agentSaid("Okay, bye!", 0);
+  let over = -1;
+  for (let t = 1000; t <= GOODBYE_ABSOLUTE_MAX_MS && over < 0; t += 1000) {
+    w.callerSaid("[inaudible]", t);
+    if (w.isOver(t + 999)) over = t + 999;
+  }
+  assert.ok(over < 0 || over >= ANSWER_WAIT_MS, "not before the agent had a chance to answer");
+  assert.equal(w.isOver(GOODBYE_ABSOLUTE_MAX_MS), true);
+
+  // The other side says goodbye; the agent's audio keeps arriving, so the cap ends it.
+  w = new GoodbyeWatcher();
+  w.callerSaid("Thanks, bye!", 0);
+  for (let t = 0; t < CALLER_GOODBYE_MAX_WAIT_MS; t += 20) w.agentAudio(t);
+  assert.equal(w.isOver(CALLER_GOODBYE_MAX_WAIT_MS - 1), false);
+  assert.equal(w.isOver(CALLER_GOODBYE_MAX_WAIT_MS), true);
+});
+
+test("goodbye watcher: a backchannel in the middle of a farewell doesn't hide it", () => {
+  const w = new GoodbyeWatcher();
+  w.agentSaid("Thanks so much, have a great", 0);
+  w.callerSaid("Mhm.", 200);
+  w.agentSaid(" day!", 400);
+  assert.equal(w.isOver(400 + GOODBYE_QUIET_MS), true);
+});
+
+test("goodbye watcher: the agent answering a last question is never cut off by the cap", () => {
+  const w = new GoodbyeWatcher();
+  w.agentSaid("Okay, bye!", 0);
+  // A long "one more thing" from the other side, finishing well after the agent's goodbye.
+  for (let t = 1000; t <= 9000; t += 1000) w.callerSaid(" and one more thing about the plumber", t);
+  w.agentSaid("Sure", 9500);
+  assert.equal(w.isOver(9600), false, "the cap restarted when the other side added something");
+  w.agentSaid(", what's their number?", 9700);
+  assert.equal(w.isOver(60_000), false, "the agent carried on");
+});
+
+test("silent μ-law audio isn't counted as speech", () => {
+  assert.equal(isAudibleMulaw(Buffer.alloc(160, 0xff)), false);
+  assert.equal(isAudibleMulaw(Buffer.alloc(160, 0x7f)), false);
+  assert.equal(isAudibleMulaw(Buffer.alloc(0)), false);
+  assert.equal(isAudibleMulaw(dtmfAudio("5").subarray(0, 160)), true);
+  const faint = Buffer.from(Array.from({ length: 160 }, (_, i) => linearToMulaw(60 * Math.sin(i))));
+  assert.equal(isAudibleMulaw(faint), false, "a faint hiss");
+  const quietSpeech = Buffer.from(Array.from({ length: 160 }, (_, i) => linearToMulaw(1500 * Math.sin(i / 3))));
+  assert.equal(isAudibleMulaw(quietSpeech), true, "even quiet speech");
 });
