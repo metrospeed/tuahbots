@@ -7,3 +7,4 @@ process.env.TWILIO_PHONE_NUMBER ??= "+15005550006";
 process.env.ADMIN_PASSWORD ??= "admin-pass";
 process.env.SESSION_SECRET ??= "session-secret";
 process.env.OPENAI_API_KEY ??= "sk-openai-test";
+process.env.OPENROUTER_API_KEY ??= "sk-or-test-key-0000";

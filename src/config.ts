@@ -13,7 +13,14 @@ const voiceEngine = optional("VOICE_ENGINE", "gpt-live").replace(/^claude-relay$
 if (voiceEngine !== "gpt-live" && voiceEngine !== "relay") {
   throw new Error(`VOICE_ENGINE must be "gpt-live" or "relay", got "${voiceEngine}"`);
 }
-required("OPENAI_API_KEY");
+const aiProvider = optional("AI_PROVIDER", "openai");
+if (!["openai", "openrouter", "custom"].includes(aiProvider)) {
+  throw new Error(`AI_PROVIDER must be "openai", "openrouter" or "custom", got "${aiProvider}"`);
+}
+const aiApiFormat = optional("AI_API_FORMAT", "chat");
+if (aiApiFormat !== "chat" && aiApiFormat !== "responses") {
+  throw new Error(`AI_API_FORMAT must be "chat" or "responses", got "${aiApiFormat}"`);
+}
 
 export const config = {
   port: Number(optional("PORT", "3000")),
@@ -41,6 +48,8 @@ export const config = {
   },
 
   openai: {
+    // Only changed in tests (and for proxies): where OpenAI API and GPT-Live requests go.
+    baseUrl: optional("OPENAI_BASE_URL", "https://api.openai.com/v1").replace(/\/$/, ""),
     liveModel: optional("OPENAI_LIVE_MODEL", "gpt-live-1"),
     liveVoice: optional("OPENAI_LIVE_VOICE", "marin"),
   },
@@ -51,8 +60,24 @@ export const config = {
     sessionSecret: required("SESSION_SECRET"),
   },
 
+  // Defaults for the agent model's provider; the admin panel (AI) can change
+  // them. API keys come from these variables or are saved, encrypted, in the
+  // admin panel; they are never shown again or sent anywhere but their endpoint.
+  ai: {
+    provider: aiProvider as "openai" | "openrouter" | "custom",
+    // Custom OpenAI-compatible endpoint, e.g. https://llm.example.com/v1
+    baseUrl: optional("AI_BASE_URL", "").replace(/\/$/, ""),
+    apiFormat: aiApiFormat as "chat" | "responses",
+    keys: {
+      openai: process.env.OPENAI_API_KEY ?? "",
+      openrouter: process.env.OPENROUTER_API_KEY ?? "",
+      // Only sent to AI_BASE_URL.
+      custom: process.env.AI_API_KEY ?? "",
+    },
+  },
+
   agent: {
-    // OpenAI model behind the chat agent, call agents and call summaries.
+    // Model behind the chat agent, call agents and call summaries.
     model: optional("AGENT_MODEL", "gpt-6-luna"),
     // Name the assistant introduces itself with.
     name: optional("AGENT_NAME", "Tuah"),

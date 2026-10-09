@@ -1246,3 +1246,174 @@ test("an answer about a conversation that moved on is ignored; long turns reach 
     fakeAgent.callOverDelayMs = 0;
   }
 });
+
+test("admin AI settings: custom endpoint over Chat Completions, keys encrypted, write-only, 2FA-gated and bound to their endpoint", { skip: !enabled }, async () => {
+  // A stand-in OpenAI-compatible server speaking Chat Completions.
+  const chatRequests: Array<{ auth: string; body: any }> = [];
+  const fakeChat = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const request = JSON.parse(body || "{}");
+      chatRequests.push({ auth: String(req.headers.authorization ?? ""), body: request });
+      const chunk = (delta: object, finish: string | null = null) =>
+        `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 0, model: request.model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+      if (!request.stream) {
+        const message = { role: "assistant", content: "OK" };
+        return void res
+          .writeHead(200, { "Content-Type": "application/json" })
+          .end(JSON.stringify({ id: "c0", object: "chat.completion", created: 0, model: request.model, choices: [{ index: 0, message, finish_reason: "stop" }] }));
+      }
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      const answered = request.messages.some((m: any) => m.role === "tool");
+      if (answered) {
+        res.write(chunk({ role: "assistant", content: "You have " }));
+        res.write(chunk({ content: "no tasks yet." }, "stop"));
+      } else {
+        res.write(chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call_x", type: "function", function: { name: "list_tasks", arguments: "" } }] }));
+        res.write(chunk({ tool_calls: [{ index: 0, function: { arguments: "{}" } }] }, "tool_calls"));
+      }
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  await new Promise<void>((resolve) => fakeChat.listen(0, resolve));
+  const chatUrl = `http://127.0.0.1:${(fakeChat.address() as AddressInfo).port}/v1`;
+  const secret = "sk-custom-secret-key-WXYZ1234";
+
+  try {
+    const cookie = await login();
+    const save = (fields: Record<string, string>) =>
+      fetch(`${base}/admin/ai`, {
+        method: "POST",
+        redirect: "manual",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+        body: new URLSearchParams(fields),
+      });
+    const page = async () => (await fetch(`${base}/admin/ai`, { headers: { Cookie: cookie } })).text();
+    const keyRows = async () => db.query("SELECT key, value::text AS value FROM settings WHERE key LIKE 'ai.key.%'");
+
+    // Signed out: nothing.
+    const anon = await fetch(`${base}/admin/ai`, { redirect: "manual" });
+    assert.equal(anon.headers.get("location"), "/admin/login");
+
+    // The environment's OpenAI key is in use, shown only by its last 4 characters.
+    const first = await page();
+    assert.match(first, /From the server's <code>OPENAI_API_KEY<\/code>/);
+    assert.doesNotMatch(first, /sk-openai-test/);
+
+    const custom = {
+      provider: "custom",
+      model: "local/llama-5",
+      baseUrl: chatUrl,
+      apiFormat: "chat",
+      reasoning: "1",
+      liveModel: "gpt-live-1",
+      liveVoice: "marin",
+      key_custom: secret,
+    };
+    // Changing the provider or a key needs a current authenticator code.
+    const noCode = await save(custom);
+    assert.equal(noCode.status, 400);
+    assert.match(await noCode.text(), /authenticator code/);
+    // Endpoints on the internet must use HTTPS; metadata addresses and embedded credentials are refused.
+    for (const [baseUrl, error] of [
+      ["http://llm.example.com/v1", /Use https/],
+      ["http://169.254.169.254/v1", /not allowed/],
+      ["https://me:pw@llm.example.com/v1", /credentials/],
+    ] as const) {
+      const bad = await save({ ...custom, baseUrl, code: await nextAdminCode() });
+      assert.equal(bad.status, 400);
+      const text = await bad.text();
+      assert.match(text, error);
+      assert.doesNotMatch(text, new RegExp(secret), "a submitted key is never echoed back");
+    }
+    assert.deepEqual(await keyRows(), []);
+
+    const saved = await save({ ...custom, code: await nextAdminCode() });
+    assert.equal(saved.status, 302, await saved.text());
+    assert.equal(saved.headers.get("location"), "/admin/ai?saved=1");
+    // Stored encrypted, and never shown again.
+    const rows = await keyRows();
+    assert.equal(rows.length, 1);
+    assert.doesNotMatch(rows[0].value, /WXYZ1234|sk-custom/);
+    const after = await page();
+    assert.doesNotMatch(after, new RegExp(secret));
+    assert.match(after, /ends in <code>1234<\/code>/);
+    assert.match(after, /<option value="custom" selected>/);
+
+    // The chat agent now runs on the custom endpoint, tools included.
+    const invite = await fetch(`${base}/admin/users`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      body: new URLSearchParams({ name: "Provider Tester", phone: "" }),
+    });
+    const link = /https:\/\/agent\.test(\/join\/[A-Za-z0-9_-]+)/.exec(await invite.text())![1];
+    const userCookie = await createLogin(link, "provider@example.com", "correct horse battery");
+    const sent = await fetch(`${base}/app/api/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: userCookie },
+      body: JSON.stringify({ text: "Any tasks?" }),
+    });
+    assert.equal(sent.status, 200);
+    let state: any;
+    for (let i = 0; i < 100; i++) {
+      state = await (await fetch(`${base}/app/api/state`, { headers: { Cookie: userCookie } })).json();
+      if (!state.busy && state.messages.some((m: any) => m.role === "assistant")) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(state.messages.some((m: any) => m.role === "assistant" && m.body === "You have no tasks yet."), JSON.stringify(state.messages));
+    const [toolTurn, answerTurn] = chatRequests.filter((r) => r.body.stream);
+    assert.equal(toolTurn.auth, `Bearer ${secret}`);
+    assert.equal(toolTurn.body.model, "local/llama-5");
+    assert.equal(toolTurn.body.messages[0].role, "system");
+    assert.match(toolTurn.body.messages[0].content, /You are talking with Provider Tester/);
+    assert.equal(toolTurn.body.reasoning_effort, "medium");
+    assert.equal(toolTurn.body.stream, true);
+    assert.ok(toolTurn.body.tools.some((t: any) => t.type === "function" && t.function.name === "list_tasks"));
+    const toolReply = answerTurn.body.messages.find((m: any) => m.role === "tool");
+    assert.equal(toolReply.tool_call_id, "call_x");
+    assert.equal(answerTurn.body.messages.find((m: any) => m.tool_calls)?.tool_calls[0].function.name, "list_tasks");
+    // No OpenAI request was made for that reply.
+    assert.ok(!openAIRequests.some((r) => JSON.stringify(r.input ?? "").includes("Any tasks?")));
+
+    // The connection test uses the saved settings.
+    const tested = await (await fetch(`${base}/admin/ai/test`, { method: "POST", headers: { Cookie: cookie } })).text();
+    assert.match(tested, /Connected to Custom OpenAI-compatible endpoint \(local\/llama-5\)/);
+
+    // Non-sensitive changes (model, reasoning) need no code.
+    const { key_custom: _k, ...withoutKey } = custom;
+    assert.equal((await save({ ...withoutKey, model: "local/llama-5-mini", reasoning: "" })).status, 302);
+    await fetch(`${base}/admin/ai/test`, { method: "POST", headers: { Cookie: cookie } });
+    const plain = chatRequests.at(-1)!.body;
+    assert.equal(plain.model, "local/llama-5-mini");
+    assert.equal(plain.reasoning_effort, undefined);
+    assert.doesNotMatch(JSON.stringify(await keyRows()), /WXYZ/);
+
+    // A saved key stays with its endpoint: moving the URL needs the new endpoint's key.
+    const moved = await save({ ...withoutKey, baseUrl: chatUrl.replace("127.0.0.1", "localhost"), code: await nextAdminCode() });
+    assert.equal(moved.status, 400);
+    assert.match(await moved.text(), /endpoint URL changed/);
+    // Even a row tampered to point elsewhere won't decrypt for another endpoint.
+    await db.pool.query(
+      `UPDATE settings SET value = jsonb_set(value, '{endpoint}', to_jsonb($1::text)) WHERE key = 'ai.key.custom'`,
+      ["http://localhost:1/v1"],
+    );
+    await db.pool.query(
+      `UPDATE settings SET value = jsonb_set(value, '{baseUrl}', to_jsonb($1::text)) WHERE key = 'ai.settings'`,
+      ["http://localhost:1/v1"],
+    );
+    const tampered = await page();
+    assert.match(tampered, /can&#39;t be decrypted|can't be decrypted/);
+
+    // Back to OpenAI, removing the custom key.
+    const restore = await save({ ...withoutKey, provider: "openai", model: "gpt-6-luna", baseUrl: "", remove_custom: "1", code: await nextAdminCode() });
+    assert.equal(restore.status, 302, await restore.text());
+    assert.deepEqual(await keyRows(), []);
+  } finally {
+    fakeChat.closeAllConnections();
+    fakeChat.close();
+    const { loadAiSettings } = await import("../src/agent/provider.js");
+    await db.pool.query("DELETE FROM settings WHERE key LIKE 'ai.%'");
+    await loadAiSettings();
+  }
+});

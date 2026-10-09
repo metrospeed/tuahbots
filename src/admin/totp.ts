@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { config } from "../config.js";
+import { openSecret, sealSecret } from "../secrets.js";
 
 /** Time-based one-time passwords (RFC 6238): SHA-1, 6 digits, 30-second steps. */
 const STEP_SECONDS = 30;
@@ -82,27 +83,13 @@ export function otpauthUri(secret: string): string {
 
 // ---- Secret encryption -------------------------------------------------------
 
-function key(): Buffer {
-  return Buffer.from(crypto.hkdfSync("sha256", config.admin.sessionSecret, "tuah", "admin-totp-secret", 32));
-}
-
 /** AES-256-GCM, so a database dump alone doesn't reveal the 2FA secret. */
 export function encryptSecret(plain: string): string {
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", key(), iv);
-  const data = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
-  return [iv, cipher.getAuthTag(), data].map((b) => b.toString("base64url")).join(".");
+  return sealSecret(plain, "admin-totp-secret");
 }
 
 export function decryptSecret(enc: string): string | null {
-  try {
-    const [iv, tag, data] = enc.split(".").map((p) => Buffer.from(p, "base64url"));
-    const decipher = crypto.createDecipheriv("aes-256-gcm", key(), iv);
-    decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8");
-  } catch {
-    return null;
-  }
+  return openSecret(enc, "admin-totp-secret");
 }
 
 // ---- Recovery codes ----------------------------------------------------------

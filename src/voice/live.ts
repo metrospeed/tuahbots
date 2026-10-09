@@ -1,11 +1,11 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
-import OpenAI from "openai";
 import { TranscriptGrouper, type TranscriptSegment } from "openai/lib/live/transcript-grouper";
 import type { ServerEvent, SessionConfig } from "openai/resources/live/live";
 import { LiveWS } from "openai/resources/live/ws";
 import { WebSocket, WebSocketServer } from "ws";
 import { runAgent, type AgentTool, type ContentPart } from "../agent/llm.js";
+import { aiSettings, liveClient } from "../agent/provider.js";
 import { recentChatContext, taskBrief, userDetails } from "../agent/context.js";
 import {
   LIVE_BACKEND_ADDENDUM,
@@ -34,7 +34,6 @@ import { getSettings } from "../settings.js";
  * carries out with the same tools the chat agent uses.
  */
 export const streamServer = new WebSocketServer({ noServer: true });
-const openai = config.voice.engine === "gpt-live" ? new OpenAI() : undefined;
 
 /** Twilio sends 20 ms frames; buffer about 3 s of audio while GPT-Live starts. */
 const MAX_PENDING_FRAMES = 150;
@@ -357,9 +356,9 @@ class LiveCall {
       }
     }
     return {
-      model: config.openai.liveModel,
+      model: aiSettings().liveModel,
       instructions,
-      audio: { format: { type: "audio/pcmu", rate: 8000 }, output: { voice: config.openai.liveVoice } },
+      audio: { format: { type: "audio/pcmu", rate: 8000 }, output: { voice: aiSettings().liveVoice } },
       delegation: { type: "client" },
       input: [
         {
@@ -379,7 +378,7 @@ class LiveCall {
   }
 
   private connectLive(sessionConfig: SessionConfig): void {
-    const live = new LiveWS(openai!);
+    const live = new LiveWS(liveClient());
     this.live = live;
     live.on("error", (err) => console.error("GPT-Live error", err.error ?? err.message));
     live.on("close", (code, reason) => {

@@ -457,3 +457,127 @@ test("goodbye detection: passing a message on, then saying goodbye, is a goodbye
     assert.ok(endsWithFarewell(said), said);
   }
 });
+
+// ---- AI providers --------------------------------------------------------------
+
+const provider = await import("../src/agent/provider.js");
+const secrets = await import("../src/secrets.js");
+const { toChatMessages } = await import("../src/agent/llm.js");
+
+test("custom endpoint URLs: HTTPS, or HTTP only to this machine or a private network", () => {
+  for (const ok of [
+    "https://llm.example.com/v1",
+    "https://openrouter.ai/api/v1",
+    "http://localhost:11434/v1",
+    "http://127.0.0.1:8000/v1",
+    "http://ollama:11434/v1",
+    "http://192.168.1.20/v1",
+    "http://10.0.0.5:8000/v1",
+    "http://[::1]:8000/v1",
+  ]) {
+    assert.equal(provider.checkEndpointUrl(ok), null, ok);
+  }
+  assert.match(provider.checkEndpointUrl("http://llm.example.com/v1")!, /https/);
+  assert.match(provider.checkEndpointUrl("http://8.8.8.8/v1")!, /https/);
+  assert.match(provider.checkEndpointUrl("https://user:pass@llm.example.com/v1")!, /credentials/);
+  assert.match(provider.checkEndpointUrl("https://llm.example.com/v1?key=abc")!, /query/);
+  assert.match(provider.checkEndpointUrl("ftp://llm.example.com")!, /https/);
+  assert.match(provider.checkEndpointUrl("not a url")!, /isn't valid/);
+  // Cloud metadata services are refused even though they're "local".
+  assert.match(provider.checkEndpointUrl("http://169.254.169.254/latest")!, /not allowed/);
+  assert.match(provider.checkEndpointUrl("http://metadata.google.internal/v1")!, /not allowed/);
+});
+
+test("AI settings and API keys are validated", () => {
+  const valid = { ...provider.DEFAULT_AI_SETTINGS, provider: "openrouter" as const, model: "anthropic/claude-sonnet-5.5:beta" };
+  assert.equal(provider.validateAiSettings(valid), null);
+  assert.match(provider.validateAiSettings({ ...valid, model: "" })!, /model id/);
+  assert.match(provider.validateAiSettings({ ...valid, model: "gpt 6<script>" })!, /model id/);
+  assert.match(provider.validateAiSettings({ ...valid, provider: "custom", baseUrl: "" })!, /endpoint URL/);
+  assert.match(provider.validateAiSettings({ ...valid, provider: "nope" as any })!, /provider/);
+  assert.match(provider.validateAiSettings({ ...valid, liveVoice: "marin; rm" })!, /voice/);
+  assert.equal(provider.validateApiKey("sk-or-v1-0123456789abcdef"), null);
+  assert.match(provider.validateApiKey("short")!, /8 to 512/);
+  assert.match(provider.validateApiKey("sk-abc def ghi")!, /spaces/);
+});
+
+test("sealed secrets only open for the same purpose and context", () => {
+  const sealed = secrets.sealSecret("sk-live-key-123456", "ai-api-key", "custom|https://a.example/v1");
+  assert.ok(!sealed.includes("sk-live"));
+  assert.equal(secrets.openSecret(sealed, "ai-api-key", "custom|https://a.example/v1"), "sk-live-key-123456");
+  // Bound to the endpoint: copying it to another endpoint (or use) doesn't work.
+  assert.equal(secrets.openSecret(sealed, "ai-api-key", "custom|https://evil.example/v1"), null);
+  assert.equal(secrets.openSecret(sealed, "admin-totp-secret", "custom|https://a.example/v1"), null);
+  const tampered = sealed.slice(0, -2) + (sealed.endsWith("A") ? "BB" : "AA");
+  assert.equal(secrets.openSecret(tampered, "ai-api-key", "custom|https://a.example/v1"), null);
+  assert.equal(secrets.secretHint("sk-or-v1-0123456789abcdef"), "cdef");
+  assert.equal(secrets.secretHint("short-key"), "");
+});
+
+test("API keys are scrubbed from error text", () => {
+  const out = secrets.redactSecrets("401 bad key my-own-key-value-99 (Authorization: Bearer abc.def) sk-proj-ABCDEFGHIJKL", ["my-own-key-value-99"]);
+  assert.doesNotMatch(out, /my-own-key-value-99|abc\.def|ABCDEFGHIJKL/);
+  assert.match(out, /\[redacted\]/);
+});
+
+test("Responses API items convert to Chat Completions messages", () => {
+  const messages = toChatMessages("System prompt.", [
+    { role: "developer", content: "Details about the user." },
+    {
+      role: "user",
+      content: [
+        { type: "input_text", text: "Here's the quote" },
+        { type: "input_image", image_url: "data:image/png;base64,AAAA", detail: "auto" },
+        { type: "input_file", filename: "q.pdf", file_data: "data:application/pdf;base64,BBBB" },
+      ],
+    },
+    { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "xyz" } as any,
+    { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Checking.", annotations: [] }] } as any,
+    { type: "function_call", call_id: "call_a", name: "list_tasks", arguments: "{}" },
+    { type: "function_call", call_id: "call_b", name: "cancel_task", arguments: '{"task_id":3}' },
+    { type: "function_call_output", call_id: "call_a", output: "No tasks." },
+    { type: "function_call_output", call_id: "call_b", output: "Cancelled." },
+    { role: "developer", content: "Note: call ended" },
+    { role: "assistant", content: "All done." },
+  ]);
+  assert.deepEqual(messages, [
+    { role: "system", content: "System prompt.\n\nDetails about the user." },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "Here's the quote" },
+        { type: "image_url", image_url: { url: "data:image/png;base64,AAAA", detail: "auto" } },
+        { type: "file", file: { filename: "q.pdf", file_data: "data:application/pdf;base64,BBBB" } },
+      ],
+    },
+    {
+      role: "assistant",
+      content: "Checking.",
+      tool_calls: [
+        { id: "call_a", type: "function", function: { name: "list_tasks", arguments: "{}" } },
+        { id: "call_b", type: "function", function: { name: "cancel_task", arguments: '{"task_id":3}' } },
+      ],
+    },
+    { role: "tool", tool_call_id: "call_a", content: "No tasks." },
+    { role: "tool", tool_call_id: "call_b", content: "Cancelled." },
+    { role: "system", content: "Note: call ended" },
+    { role: "assistant", content: "All done." },
+  ]);
+});
+
+test("OpenRouter: fixed endpoint, Chat Completions, no-data-collection routing; OpenAI: Responses API", () => {
+  const router = provider.agentEndpoint({ ...provider.DEFAULT_AI_SETTINGS, provider: "openrouter", apiFormat: "responses", model: "openai/gpt-6-luna" });
+  assert.equal(router.format, "chat");
+  assert.equal(router.client.baseURL, provider.OPENROUTER_BASE_URL);
+  assert.equal(router.client.apiKey, "sk-or-test-key-0000");
+  assert.deepEqual(router.extraBody, { provider: { data_collection: "deny" } });
+  const open = provider.agentEndpoint({ ...provider.DEFAULT_AI_SETTINGS, provider: "openrouter", openrouterNoDataCollection: false });
+  assert.deepEqual(open.extraBody, {});
+  const openai = provider.agentEndpoint({ ...provider.DEFAULT_AI_SETTINGS, provider: "openai", apiFormat: "chat" });
+  assert.equal(openai.format, "responses");
+  assert.equal(openai.client.apiKey, "sk-openai-test");
+  // A custom endpoint without a key of its own gets no other provider's key.
+  const custom = provider.agentEndpoint({ ...provider.DEFAULT_AI_SETTINGS, provider: "custom", baseUrl: "https://llm.example.com/v1" });
+  assert.equal(custom.client.apiKey, "no-key");
+  assert.throws(() => provider.agentEndpoint({ ...provider.DEFAULT_AI_SETTINGS, provider: "custom", baseUrl: "" }), /No endpoint URL/);
+});
