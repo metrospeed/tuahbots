@@ -3,45 +3,68 @@
  * a goodbye even if GPT-Live never delegates "hang up".
  */
 
-// Common farewells, then at most two short words ("Goodbye, Mr. Smith!", "Bye for now.").
-// "Take care of it" is a promise, not a goodbye ("take care of yourself" is one).
-const FAREWELL_AT_END = new RegExp(
-  String.raw`\b(good-?\s?bye|bye(?:[- ]bye)?|bye now|take care(?!\s+of\b(?!\s+your?sel(?:f|ves)\b))|talk (?:to you )?(?:soon|later)|` +
-    String.raw`have an? (?:great|good|nice|wonderful|lovely|fantastic) (?:day|one|night|evening|afternoon|morning|weekend|rest of (?:your|the) (?:day|evening|afternoon|night|weekend|week)))` +
-    String.raw`\b[\s.!,…]*(?:[^\s?]{1,12}[\s.!,…]*){0,2}$`,
-  "i",
-);
-
+// Common farewells. "Take care of it" is a promise, not a goodbye ("take care of yourself" is one).
+const COMMON_FAREWELLS =
+  String.raw`good-?\s?bye|bye(?:[- ]bye)?|bye now|take care(?!\s+of\b(?!\s+your?sel(?:f|ves)\b))|talk (?:to you )?(?:soon|later)|` +
+  String.raw`have an? (?:great|good|nice|wonderful|lovely|fantastic) (?:day|one|night|evening|afternoon|morning|weekend|rest of (?:your|the) (?:day|evening|afternoon|night|weekend|week))`;
 // Farewells that are also ordinary phrases ("Saturday is a good night", "all the best
-// reviews", "see you later today"): they count only at the start of a sentence or
-// after a closing word, and only at the very end or followed by a name or
-// "too"/"now"/"then"/"to you".
-const PLAIN_FAREWELL_AT_END = new RegExp(
-  String.raw`\b(good ?night|all the best|see you (?:later|soon|then)|` +
-    String.raw`have an? (?:great|good|nice|wonderful|lovely|fantastic) week|` +
-    String.raw`enjoy (?:the |your )?(?:day|evening|afternoon|weekend|week|rest of (?:your|the) (?:day|evening|afternoon|weekend|week)))` +
-    String.raw`\b((?:[\s,]+[^\s!,…?']+){0,2})[\s.!,…]*$`,
-  "i",
-);
-const AFTER_PLAIN_FAREWELL = new Set(["too", "now", "then", "to", "you"]);
+// reviews", "see you later today"): they only count at the start of a sentence or
+// after a closing word.
+const PLAIN_FAREWELLS =
+  String.raw`good ?night|all the best|see you (?:later|soon|then)|have an? (?:great|good|nice|wonderful|lovely|fantastic) week|` +
+  String.raw`enjoy (?:the |your )?(?:day|evening|afternoon|weekend|week|rest of (?:your|the) (?:day|evening|afternoon|weekend|week))`;
+// A farewell, then at most two short words, then the end.
+const COMMON_FROM_HERE = new RegExp(String.raw`^(?:${COMMON_FAREWELLS})\b((?:[\s.!,…]*[^\s?]{1,12}){0,2})[\s.!,…]*$`, "i");
+const PLAIN_FROM_HERE = new RegExp(String.raw`^(?:${PLAIN_FAREWELLS})\b((?:[\s.!,…]*[^\s?]{1,12}){0,2})[\s.!,…]*$`, "i");
+const FAREWELL_STARTS = new RegExp(String.raw`\b(?:${COMMON_FAREWELLS}|${PLAIN_FAREWELLS})`, "gi");
+/** Words that may follow a farewell, besides a name ("Goodbye, Mr. Smith!", "Bye for now", "See you then, everyone"). */
+const AFTER_FAREWELL = new Set([
+  "now", "then", "too", "for", "to", "you", "all", "everyone", "everybody", "folks", "guys", "again", "bye", "there",
+  "okay", "ok", "see", "later", "soon", "today", "tonight", "my", "friend", "buddy", "sir", "maam", "mate", "take", "care",
+  "of", "yourself", "yourselves",
+]);
 const BEFORE_PLAIN_FAREWELL = /(?:^|[.!,…;:]|\b(?:okay|ok|alright|all right|thanks|thank you|you too|and|well|so|great|perfect|bye))$/i;
-// Passing a message on is not saying goodbye: "I'll tell her good night", "say bye to him for me".
-const RELAYED = /\b(?:tell|tells|told|telling|say|says|said|saying|text|texting|wish|wishes|wishing|message|send|sending|remind|give)\b(?:\s+(?:her|him|them|you|me|us|everyone|my \w+|your \w+))?\s*$/i;
+// Passing a message on is not saying goodbye: "I'll tell her good night", "she said she'll talk to you later".
+const REPORTED = /\b(?:tell|tells|told|telling|say|says|said|saying|asked|asks|text|texting|wish|wishes|wishing|message|remind|reminded)\b/i;
+// Someone else's plans or advice ("they'll talk to you later", "you should have a great weekend",
+// "tell her to have a great day"): only "I/we will …" is the agent taking its leave.
+const MODAL_BEFORE = /\b([\p{L}'’]+?)(?:['’]ll|\s+(will|would|should|could|can|might|must|won't|can't|don't|doesn't|didn't|to))\s*$/iu;
+
+function farewellContextOk(before: string): boolean {
+  const sentence = before.split(/[.!?…]/).pop() ?? "";
+  if (REPORTED.test(sentence)) return false;
+  const modal = MODAL_BEFORE.exec(sentence);
+  if (!modal) return true;
+  return ["i", "we"].includes(modal[1].toLowerCase()) && ["will", "can", undefined].includes(modal[2]?.toLowerCase());
+}
+
+function trailingOk(trailing: string): boolean {
+  const words = trailing.match(/[\p{L}\p{N}][\p{L}\p{N}'’.]*/gu) ?? [];
+  return words.every((w) => AFTER_FAREWELL.has(w.replace(/[.'’]/g, "").toLowerCase()) || /^\p{Lu}/u.test(w));
+}
 
 /** The words end with a goodbye ("…Thanks so much, bye!"). */
 export function endsWithFarewell(text: string): boolean {
   // Only the tail counts: "before I say goodbye, one more thing" is not a goodbye.
   const tail = text.trim().slice(-80);
   if (tail.endsWith("?")) return false;
-  const common = FAREWELL_AT_END.exec(tail);
-  if (common) return !RELAYED.test(tail.slice(0, common.index));
-  const plain = PLAIN_FAREWELL_AT_END.exec(tail);
-  if (!plain) return false;
-  const before = tail.slice(0, plain.index).trimEnd();
-  if (!BEFORE_PLAIN_FAREWELL.test(before) || RELAYED.test(before)) return false;
-  const after = plain[2].split(/[\s,]+/).filter(Boolean);
-  // Only a name (capitalized) or a closing word may follow.
-  return after.every((w) => AFTER_PLAIN_FAREWELL.has(w.replace(/\.$/, "").toLowerCase()) || /^\p{Lu}/u.test(w));
+  for (const start of tail.matchAll(FAREWELL_STARTS)) {
+    const from = tail.slice(start.index);
+    const before = tail.slice(0, start.index).trimEnd();
+    const common = COMMON_FROM_HERE.exec(from);
+    if (common && trailingOk(common[1]) && farewellContextOk(before)) return true;
+    const plain = PLAIN_FROM_HERE.exec(from);
+    if (plain && trailingOk(plain[1]) && BEFORE_PLAIN_FAREWELL.test(before) && farewellContextOk(before)) return true;
+  }
+  return false;
+}
+
+const FAREWELL_FIRST = /^[\s"“]*(?:good-?\s?bye|bye(?:[- ]bye)?|good ?night|take care(?!\s+of\b))\b([^?]*)$/i;
+
+/** A turn that opens with a goodbye and only adds a few words ("Bye, see you tomorrow!", "Good night, Mark, sleep well!"). */
+export function startsWithFarewell(turn: string): boolean {
+  const m = FAREWELL_FIRST.exec(turn.trim());
+  return !!m && (m[1].match(/[\p{L}\p{N}'’]+/gu) ?? []).length <= 8;
 }
 
 const CLOSING_WORDS = new Set([
@@ -61,8 +84,19 @@ export function hasWords(text: string): boolean {
   return /[\p{L}\p{N}]/u.test(text);
 }
 
-/** A goodbye said while handing the call on ("I'll transfer you now, have a great day!") doesn't end it. */
-const HANDOFF = /\b(?:transfer\w*|put(?:ting)? you (?:through|on hold)|connect(?:ing)? you|hold (?:on|the line|please)|please hold|one moment|just a (?:moment|sec(?:ond)?))\b/i;
+/**
+ * The other side is handing the call on or putting it on hold ("I'll transfer you
+ * now, have a great day!"): goodbyes from either side don't end the call until
+ * someone picks up again.
+ */
+const HANDOFF = new RegExp(
+  String.raw`\b(?:transfer(?:ring)? (?:you|your call)|put(?:ting)? you (?:through|on hold)|connect(?:ing)? (?:you|your call)|` +
+    String.raw`(?:get|send|pass|forward|route|switch)(?:ing)? you (?:over )?to|hold on|hang on|hold the line|stay on the line|please hold|` +
+    String.raw`one moment|one sec(?:ond)?|just a (?:moment|sec(?:ond)?|minute)|give me a (?:sec(?:ond)?|minute|moment)|bear with me)\b`,
+  "i",
+);
+/** A hand-off stops counting after this long, or once someone says something new. */
+export const HANDOFF_MAX_MS = 120_000;
 
 /** The last few words, to judge what someone just said rather than everything since they started. */
 function lastWords(text: string, n: number): string {
@@ -121,6 +155,19 @@ export class GoodbyeWatcher {
   private answerOwed = false;
   /** When the agent last said a farewell. */
   private agentFarewellAt = -Infinity;
+  /** When the other side last handed the call on, and in which of their turns. */
+  private handoffAt: number | null = null;
+  private handoffTurn = 0;
+  private callerTurns = 0;
+  /** The agent is relaying a result after its goodbye; that doesn't take the goodbye back. */
+  private relaying = false;
+
+  /**
+   * `handoffs`: watch for the other side transferring the call or putting it
+   * on hold (calls to businesses). On a user's own call, "hold on, let me find
+   * the number" is just a pause.
+   */
+  constructor(private options: { handoffs?: boolean } = {}) {}
   /** When the goodbye became pending; pushed back when the other side adds something. */
   private byeAt: number | null = null;
   /** When the goodbye first became pending; never pushed back. */
@@ -137,11 +184,14 @@ export class GoodbyeWatcher {
     // Whitespace joins words but isn't speech.
     if (!delta.trim()) return;
     this.lastSpeechAt = now;
-    if (endsWithFarewell(this.agentText)) {
+    const farewell = !this.handoffActive(now) && (endsWithFarewell(this.agentText) || startsWithFarewell(this.agentTurn));
+    if (farewell) {
       this.agentBye = true;
       this.answerOwed = false;
       this.agentFarewellAt = now;
       this.pending(now);
+    } else if (this.relaying && this.agentBye && !this.agentTurn.trim().endsWith("?")) {
+      // Relaying a result after its goodbye ("All done, it's moved to Friday."): still a goodbye, unless it asks something.
     } else if (this.byeAt === null || !isClosingReply(this.agentTurn)) {
       // The agent carried on (or is part-way through a sentence); nothing is pending.
       this.agentBye = false;
@@ -156,6 +206,8 @@ export class GoodbyeWatcher {
     if (this.lastSpeaker !== "caller" && hasWords(delta)) {
       this.callerTurn = "";
       this.lastSpeaker = "caller";
+      this.callerTurns++;
+      this.relaying = false;
       // The agent had finished a sentence: a farewell has to be in what it says next.
       if (/[.!?…]["”’']?\s*$/.test(this.agentText)) this.agentText = "";
     }
@@ -169,7 +221,14 @@ export class GoodbyeWatcher {
       return;
     }
     this.lastSpeechAt = now;
-    const farewell = endsWithFarewell(this.callerTurn) && !HANDOFF.test(this.callerTurn);
+    const recent = lastWords(this.callerTurn, 12);
+    if (this.options.handoffs !== false && HANDOFF.test(recent)) {
+      this.handoffAt = now;
+      this.handoffTurn = this.callerTurns;
+    } else if (this.handoffAt !== null && this.callerTurns > this.handoffTurn && !isClosingReply(lastWords(this.callerTurn, 4))) {
+      this.handoffAt = null; // someone picked up again
+    }
+    const farewell = endsWithFarewell(this.callerTurn) && !this.handoffActive(now);
     // Something substantive ("wait, can you also tell her good night"): a later farewell
     // from the agent must come after it, and a pending goodbye waits for the agent's answer.
     // Judged on the latest words, so a string of "Okay." from a noisy line stays a closing.
@@ -207,11 +266,16 @@ export class GoodbyeWatcher {
   extend(now: number): void {
     this.lastSpeechAt = Math.max(this.lastSpeechAt, now);
     if (this.byeAt !== null) this.byeAt = this.firstByeAt = now;
+    if (this.agentBye) this.relaying = true;
   }
 
-  /** Whether the agent has said a farewell since `since`. */
+  /** Whether the agent has said a farewell since `since` (and not carried on after it). */
   agentSaidGoodbyeSince(since: number): boolean {
-    return this.agentFarewellAt >= since;
+    return this.agentBye && this.agentFarewellAt >= since;
+  }
+
+  private handoffActive(now: number): boolean {
+    return this.handoffAt !== null && now - this.handoffAt < HANDOFF_MAX_MS;
   }
 
   /** True once a goodbye has been said and the line has gone quiet, or a time limit has passed. */

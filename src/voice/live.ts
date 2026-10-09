@@ -156,7 +156,7 @@ class LiveCall {
   private lastActivityAt = Date.now();
   private finishing = false;
   /** Hangs up after a goodbye, even if GPT-Live never delegates "hang up". */
-  private goodbye = new GoodbyeWatcher();
+  private goodbye: GoodbyeWatcher;
   /** Hold music or someone talking on the other end keeps the idle hang-up away. */
   private lineSound = new LineSound();
   private lastLineSoundAt = 0;
@@ -165,6 +165,7 @@ class LiveCall {
   private delegationStartedAt = 0;
 
   constructor(private session: RelaySession) {
+    this.goodbye = new GoodbyeWatcher({ handoffs: session.mode === "task" });
     this.grouper.on("segment.updated", (s) => this.upsertSegment(s));
     this.grouper.on("segment.closed", ({ segment }) => this.saveSegment(segment));
     // The greeting is played by Twilio's <Say> before the audio stream starts.
@@ -228,7 +229,7 @@ class LiveCall {
         // Sound on the line with no words (hold music, a TV) stretches a user call's idle limit, but not forever.
         const lineBusy = Date.now() - this.lastLineSoundAt < 5000;
         const idleLimit = this.session.mode === "task" || lineBusy ? TASK_IDLE_HANGUP_MS : IDLE_HANGUP_MS;
-        if (Date.now() - this.lastActivityAt < idleLimit || this.finishing) return;
+        if (Date.now() - this.lastActivityAt < idleLimit || this.finishing || this.busyWithRequest()) return;
         this.instruct("Nobody has said anything for a while. Say a brief goodbye.");
         this.finishAfterSpeech(true, MAX_ASKED_GOODBYE_MS);
       }, 5000),
@@ -432,7 +433,7 @@ class LiveCall {
   private checkGoodbye(): void {
     if (this.finishing) return;
     // "Okay, I'll take care of it" while the backend works must never cancel the errand.
-    if (this.delegationsInFlight > 0 && Date.now() - this.delegationStartedAt < DELEGATION_HOLD_MAX_MS) return;
+    if (this.busyWithRequest()) return;
     if (!this.goodbye.isOver(Date.now())) return;
     const who = this.goodbye.endedBy === "agent" ? "Agent" : "The other side";
     console.log(`Call ${this.callSid}: ${who.toLowerCase()} said goodbye; hanging up`);
@@ -464,6 +465,11 @@ class LiveCall {
     }
   }
 
+  /** The agent backend is working on something for the caller (and hasn't been at it for too long). */
+  private busyWithRequest(): boolean {
+    return this.delegationsInFlight > 0 && Date.now() - this.delegationStartedAt < DELEGATION_HOLD_MAX_MS;
+  }
+
   private queueDelegation(delegationId: string): void {
     if (this.delegationsInFlight++ === 0) this.delegationStartedAt = Date.now();
     // One at a time, so results land in the transcript in order.
@@ -472,7 +478,7 @@ class LiveCall {
       .catch((err) => this.fail("Delegation failed", err))
       .finally(() => {
         this.delegationsInFlight--;
-        this.delegationStartedAt = Date.now();
+        this.delegationStartedAt = this.lastActivityAt = Date.now();
         // Give the agent time to relay the result before a pending goodbye ends the call.
         this.goodbye.extend(Date.now());
       });
