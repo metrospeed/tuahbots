@@ -2,6 +2,7 @@ import { AgentRunError, runAgent } from "../agent/llm.js";
 import { historyFromTranscript, userDetails } from "../agent/context.js";
 import { loadPromptOverrides, USER_ASSISTANT_PROMPT } from "../agent/prompts.js";
 import { userTools } from "../agent/tools.js";
+import { loadAiSettings, redact } from "../agent/provider.js";
 import { addMessage, pool, queryOne, type User } from "../db/index.js";
 import { withLock } from "../lock.js";
 import { userChatConversation } from "../tasks.js";
@@ -47,6 +48,7 @@ async function answer(user: User, conversationId: number): Promise<void> {
   if (last?.role !== "user") return;
   try {
     await loadPromptOverrides();
+    await loadAiSettings();
     const result = await runAgent({
       system: USER_ASSISTANT_PROMPT,
       systemDetails: await userDetails(user),
@@ -56,7 +58,8 @@ async function answer(user: User, conversationId: number): Promise<void> {
     });
     if (result.text) await addMessage(conversationId, "assistant", result.text);
   } catch (err) {
-    console.error("Chat agent failed", err instanceof AgentRunError ? err.cause : err);
+    const cause = err instanceof AgentRunError ? err.cause : err;
+    console.error("Chat agent failed", redact((cause as Error)?.stack ?? String(cause)));
     // If tools already ran (e.g. a call was placed), say what happened rather than "nothing worked".
     const done = err instanceof AgentRunError ? err.toolOutputs.filter((o) => !o.startsWith("Error:")) : [];
     await addMessage(

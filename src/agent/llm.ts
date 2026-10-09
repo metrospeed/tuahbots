@@ -1,12 +1,16 @@
-import OpenAI, { APIUserAbortError } from "openai";
+import { APIUserAbortError } from "openai";
+import type {
+  ChatCompletionAssistantMessageParam,
+  ChatCompletionContentPart,
+  ChatCompletionFunctionTool,
+  ChatCompletionMessageParam,
+} from "openai/resources/chat/completions";
 import type {
   FunctionTool,
   ResponseInputContent,
   ResponseInputItem,
 } from "openai/resources/responses/responses";
-import { config } from "../config.js";
-
-export const openai = new OpenAI();
+import { agentEndpoint, type AgentEndpoint } from "./provider.js";
 
 export type InputItem = ResponseInputItem;
 export type ContentPart = ResponseInputContent;
@@ -80,10 +84,26 @@ function toFunctionTool(def: ToolDefinition): FunctionTool {
   };
 }
 
-/** Tool-use loop on the OpenAI Responses API. Nothing is stored server-side. */
+/** One model turn, whichever API the provider speaks. */
+interface Turn {
+  /** Output items to append to the conversation (always valid Responses API input). */
+  items: InputItem[];
+  text: string[];
+  calls: Array<{ call_id: string; name: string; arguments: string }>;
+  refused: boolean;
+  /** Stopped early (output token limit). */
+  incomplete: boolean;
+}
+
+/**
+ * Tool-use loop on the configured provider: the OpenAI Responses API, or
+ * Chat Completions (OpenRouter and most OpenAI-compatible servers). The
+ * conversation is kept as Responses API items either way. Nothing is stored
+ * server-side where the API allows us to say so.
+ */
 export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
   const toolsByName = new Map(opts.tools.map((t) => [t.definition.name, t]));
-  const tools = opts.tools.map((t) => toFunctionTool(t.definition));
+  const endpoint = agentEndpoint();
   const preamble: InputItem[] = opts.systemDetails ? [{ role: "developer", content: opts.systemDetails }] : [];
 
   const textParts: string[] = [];
@@ -91,33 +111,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
   const toolOutputs: string[] = [];
   try {
     for (let i = 0; i < (opts.maxIterations ?? 8); i++) {
-      const stream = openai.responses.stream(
-        {
-          model: config.agent.model,
-          instructions: opts.system,
-          input: [...preamble, ...opts.messages],
-          tools,
-          reasoning: { effort: opts.effort },
-          max_output_tokens: opts.maxTokens ?? 16000,
-          // Keep transcripts off OpenAI's servers; reasoning is carried forward encrypted.
-          store: false,
-          include: ["reasoning.encrypted_content"],
-        },
-        { signal: opts.signal },
-      );
-      if (opts.onText) stream.on("response.output_text.delta", (event) => opts.onText!(event.delta));
-      const response = await stream.finalResponse();
+      const input = [...preamble, ...opts.messages];
+      const turn = endpoint.format === "responses" ? await responsesTurn(endpoint, opts, input) : await chatTurn(endpoint, opts, input);
 
-      opts.messages.push(...response.output.map(toInputItem));
-      let refused = false;
-      for (const item of response.output) {
-        if (item.type !== "message") continue;
-        for (const part of item.content) {
-          if (part.type === "output_text" && part.text.trim()) textParts.push(part.text);
-          if (part.type === "refusal") refused = true;
-        }
-      }
-      if (refused) {
+      opts.messages.push(...turn.items);
+      textParts.push(...turn.text);
+      if (turn.refused) {
         if (!textParts.length) {
           textParts.push(REFUSAL_TEXT);
           opts.onText?.(REFUSAL_TEXT);
@@ -125,8 +124,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         return { text: textParts.join("\n"), toolCalls, refused: true };
       }
 
-      const calls = response.output.filter((item) => item.type === "function_call");
-      if (!calls.length || response.status === "incomplete") break;
+      const calls = turn.calls;
+      if (!calls.length || turn.incomplete) break;
 
       opts.onToolStart?.();
       const results = await Promise.all(
@@ -163,6 +162,171 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
   return { text: textParts.join("\n").trim(), toolCalls, refused: false };
 }
 
+async function responsesTurn(endpoint: AgentEndpoint, opts: RunAgentOptions, input: InputItem[]): Promise<Turn> {
+  const stream = endpoint.client.responses.stream(
+    {
+      model: endpoint.model,
+      instructions: opts.system,
+      // Reasoning carried over from a Chat Completions provider can't be replayed here.
+      input: input.filter((item) => !(item.type === "reasoning" && !item.encrypted_content)),
+      tools: opts.tools.map((t) => toFunctionTool(t.definition)),
+      ...(endpoint.reasoning ? { reasoning: { effort: opts.effort } } : {}),
+      max_output_tokens: opts.maxTokens ?? 16000,
+      // Keep transcripts off the provider's servers; reasoning is carried forward encrypted.
+      store: false,
+      ...(endpoint.reasoning ? { include: ["reasoning.encrypted_content" as const] } : {}),
+      ...endpoint.extraBody,
+    },
+    { signal: opts.signal },
+  );
+  if (opts.onText) stream.on("response.output_text.delta", (event) => opts.onText!(event.delta));
+  const response = await stream.finalResponse();
+
+  const turn: Turn = { items: response.output.map(toInputItem), text: [], calls: [], refused: false, incomplete: response.status === "incomplete" };
+  for (const item of response.output) {
+    if (item.type === "function_call") turn.calls.push(item);
+    if (item.type !== "message") continue;
+    for (const part of item.content) {
+      if (part.type === "output_text" && part.text.trim()) turn.text.push(part.text);
+      if (part.type === "refusal") turn.refused = true;
+    }
+  }
+  return turn;
+}
+
+async function chatTurn(endpoint: AgentEndpoint, opts: RunAgentOptions, input: InputItem[]): Promise<Turn> {
+  const stream = await endpoint.client.chat.completions.create(
+    {
+      model: endpoint.model,
+      messages: toChatMessages(opts.system, input),
+      ...(opts.tools.length ? { tools: opts.tools.map((t) => toChatTool(t.definition)) } : {}),
+      max_tokens: opts.maxTokens ?? 16000,
+      ...chatReasoning(endpoint, opts.effort),
+      ...endpoint.extraBody,
+      stream: true,
+    },
+    { signal: opts.signal },
+  );
+
+  let text = "";
+  let refusal = "";
+  let finish = "";
+  const slots: Array<{ id: string; name: string; arguments: string }> = [];
+  for await (const chunk of stream) {
+    const choice = chunk.choices?.[0];
+    if (!choice) continue;
+    const delta = choice.delta ?? {};
+    if (delta.content) {
+      text += delta.content;
+      opts.onText?.(delta.content);
+    }
+    if (delta.refusal) refusal += delta.refusal;
+    for (const call of delta.tool_calls ?? []) {
+      const slot = (slots[call.index ?? 0] ??= { id: "", name: "", arguments: "" });
+      if (call.id) slot.id = call.id;
+      if (call.function?.name && !slot.name) slot.name = call.function.name;
+      if (call.function?.arguments) slot.arguments += call.function.arguments;
+    }
+    if (choice.finish_reason) finish = choice.finish_reason;
+  }
+
+  const turn: Turn = { items: [], text: [], calls: [], refused: !!refusal && !text.trim(), incomplete: finish === "length" };
+  if (text.trim()) {
+    turn.text.push(text);
+    turn.items.push({ role: "assistant", content: text });
+  }
+  for (const [i, slot] of slots.entries()) {
+    if (!slot?.name) continue;
+    // Some servers leave out call ids; the model only needs them to match its own calls.
+    const call = { call_id: slot.id || `call_${Date.now().toString(36)}_${i}`, name: slot.name, arguments: slot.arguments || "{}" };
+    turn.calls.push(call);
+    turn.items.push({ type: "function_call", ...call });
+  }
+  return turn;
+}
+
+/** Reasoning effort, in the shape each Chat Completions provider expects. */
+function chatReasoning(endpoint: AgentEndpoint, effort: RunAgentOptions["effort"]): Record<string, unknown> {
+  if (!endpoint.reasoning) return {};
+  return endpoint.provider === "openrouter" ? { reasoning: { effort } } : { reasoning_effort: effort };
+}
+
+function toChatTool(def: ToolDefinition): ChatCompletionFunctionTool {
+  return {
+    type: "function",
+    function: {
+      name: def.name,
+      description: def.description,
+      parameters: { ...def.parameters, required: Object.keys(def.parameters.properties), additionalProperties: false },
+    },
+  };
+}
+
+/**
+ * Responses API items as Chat Completions messages. Developer notes before
+ * the conversation join the system prompt (some servers only accept one
+ * system message, first); later ones stay system messages in place. A model
+ * turn's text and tool calls become one assistant message.
+ */
+export function toChatMessages(system: string, items: InputItem[]): ChatCompletionMessageParam[] {
+  const leading: string[] = [system];
+  const out: ChatCompletionMessageParam[] = [];
+  let assistant: ChatCompletionAssistantMessageParam | null = null;
+  const flush = () => {
+    if (assistant) out.push(assistant);
+    assistant = null;
+  };
+  for (const item of items as any[]) {
+    if (item.type === "reasoning") continue;
+    if (item.type === "function_call") {
+      assistant ??= { role: "assistant", content: null };
+      (assistant.tool_calls ??= []).push({ id: item.call_id, type: "function", function: { name: item.name, arguments: item.arguments || "{}" } });
+      continue;
+    }
+    if (item.type === "function_call_output") {
+      flush();
+      out.push({ role: "tool", tool_call_id: item.call_id, content: typeof item.output === "string" ? item.output : JSON.stringify(item.output) });
+      continue;
+    }
+    if (item.role === "assistant") {
+      flush();
+      assistant = { role: "assistant", content: textOf(item.content) || null };
+      continue;
+    }
+    flush();
+    if (item.role === "developer" || item.role === "system") {
+      if (out.length) out.push({ role: "system", content: textOf(item.content) });
+      else leading.push(textOf(item.content));
+    } else if (item.role === "user") {
+      out.push({ role: "user", content: typeof item.content === "string" ? item.content : item.content.map(toChatPart) });
+    }
+  }
+  flush();
+  return [{ role: "system", content: leading.filter(Boolean).join("\n\n") }, ...out];
+}
+
+function textOf(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => (typeof part?.text === "string" ? part.text : typeof part?.refusal === "string" ? part.refusal : ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function toChatPart(part: ContentPart): ChatCompletionContentPart {
+  switch (part.type) {
+    case "input_text":
+      return { type: "text", text: part.text };
+    case "input_image":
+      return { type: "image_url", image_url: { url: part.image_url ?? "", detail: part.detail === "original" ? "high" : part.detail } };
+    case "input_file":
+      return { type: "file", file: { filename: part.filename ?? "attachment", file_data: part.file_data ?? "" } };
+    default:
+      return { type: "text", text: "[An attachment this model can't read]" };
+  }
+}
+
 /**
  * Turn a response output item back into an input item for the next turn. The
  * SDK's stream helper adds parsing fields (`parsed_arguments` on tool calls,
@@ -197,15 +361,41 @@ export function validateInput(tool: ToolDefinition, input: unknown): string | nu
   return null;
 }
 
-/** Single-shot helper for summaries. */
-export async function complete(system: string, prompt: string): Promise<string> {
-  const response = await openai.responses.create({
-    model: config.agent.model,
-    instructions: system,
-    input: prompt,
-    reasoning: { effort: "low" },
-    max_output_tokens: 4000,
-    store: false,
-  });
-  return response.output_text.trim();
+/** Single-shot helper for summaries and quick checks. */
+export async function complete(
+  system: string,
+  prompt: string,
+  opts: { maxTokens?: number; signal?: AbortSignal } = {},
+): Promise<string> {
+  const endpoint = agentEndpoint();
+  const maxTokens = opts.maxTokens ?? 4000;
+  if (endpoint.format === "responses") {
+    const response = await endpoint.client.responses.create(
+      {
+        model: endpoint.model,
+        instructions: system,
+        input: prompt,
+        ...(endpoint.reasoning ? { reasoning: { effort: "low" as const } } : {}),
+        max_output_tokens: maxTokens,
+        store: false,
+        ...endpoint.extraBody,
+      },
+      { signal: opts.signal },
+    );
+    return response.output_text.trim();
+  }
+  const response = await endpoint.client.chat.completions.create(
+    {
+      model: endpoint.model,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: prompt },
+      ],
+      max_tokens: maxTokens,
+      ...chatReasoning(endpoint, "low"),
+      ...endpoint.extraBody,
+    },
+    { signal: opts.signal },
+  );
+  return (response.choices?.[0]?.message?.content ?? "").trim();
 }

@@ -1,5 +1,5 @@
-import { openai } from "../agent/llm.js";
-import { config } from "../config.js";
+import { complete } from "../agent/llm.js";
+import { redact } from "../agent/provider.js";
 
 /**
  * A second opinion before hanging up. Spotting a goodbye from the words alone
@@ -29,23 +29,20 @@ const TIMEOUT_MS = 6_000;
 /** true: over; false: keep the call going; null: no usable answer (error, timeout). */
 export async function isCallOver(transcript: string, quietSeconds: number, signal?: AbortSignal): Promise<boolean | null> {
   try {
-    const response = await openai.responses.create(
+    const text = await complete(
+      CALL_OVER_PROMPT,
+      `Transcript (most recent last):\n${transcript}\n\n[The line has been quiet for ${quietSeconds} seconds since the last words.]`,
       {
-        model: config.agent.model,
-        instructions: CALL_OVER_PROMPT,
-        input: `Transcript (most recent last):\n${transcript}\n\n[The line has been quiet for ${quietSeconds} seconds since the last words.]`,
-        reasoning: { effort: "low" },
-        max_output_tokens: 2000,
-        store: false,
+        maxTokens: 2000,
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]) : AbortSignal.timeout(TIMEOUT_MS),
       },
-      { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]) : AbortSignal.timeout(TIMEOUT_MS) },
     );
-    const answer = response.output_text.trim().toUpperCase();
+    const answer = text.toUpperCase();
     if (answer.startsWith("OVER")) return true;
     if (answer.startsWith("CONTINUE")) return false;
     return null;
   } catch (err) {
-    console.warn("Call-over check failed", (err as Error).message);
+    console.warn("Call-over check failed", redact((err as Error).message));
     return null;
   }
 }

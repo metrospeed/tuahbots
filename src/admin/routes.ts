@@ -1,4 +1,5 @@
 import express from "express";
+import { aiRouter } from "./ai.js";
 import { config } from "../config.js";
 import { listMessages, pool, query, queryOne, type Attachment, type Conversation, type Task, type User, type UserNumber } from "../db/index.js";
 import { formatPhone, toE164 } from "../phone.js";
@@ -119,6 +120,7 @@ adminRouter.use("/admin", async (_req, _res, next) => {
 });
 
 adminRouter.get("/admin", (_req, res) => res.redirect("/admin/conversations"));
+adminRouter.use(aiRouter);
 
 const KIND_LABELS: Record<string, string> = {
   user_web: "Web chat",

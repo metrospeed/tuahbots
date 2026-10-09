@@ -26,6 +26,7 @@ const NAV = [
   ["/admin/numbers", "Numbers"],
   ["/admin/blocked", "Blocked numbers"],
   ["/admin/prompts", "Prompts"],
+  ["/admin/ai", "AI"],
   ["/admin/settings", "Settings"],
 ];
 
@@ -79,6 +80,7 @@ audio{width:100%}
 button.danger{background:var(--bad);color:#fff;border-color:var(--bad)}
 fieldset{border:1px solid var(--line);border-radius:12px;padding:14px;margin:0 0 12px}legend{color:var(--muted);font-size:12.5px;font-weight:550;padding:0 4px}
 textarea.wide{width:100%}
+label.check{display:inline-flex;gap:8px;align-items:center;font-size:13.5px;margin:6px 0}label.check input{padding:0}
 </style></head><body>
 <header><b>${esc(config.agent.name)} admin</b>${nav}
 <form method="post" action="/admin/logout"><button>Log out</button></form></header>
