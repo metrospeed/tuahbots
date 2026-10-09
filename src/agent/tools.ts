@@ -1,13 +1,17 @@
 import { addMessage, getTask, type Task, type User } from "../db/index.js";
 import {
+  checkOutboundAllowed,
   describeTask,
   finishTask,
   placeTaskCall,
   recentTasks,
   visibleTask,
   startCallTask,
+  startTextTask,
   TaskError,
 } from "../tasks.js";
+import { smsConfigured } from "../sms.js";
+import { continueTextTask } from "../texts.js";
 import type { AgentTool } from "./llm.js";
 
 /** Hooks a live phone call provides to its agent. */
@@ -66,10 +70,11 @@ export function userTools(user: User, conversationId: number, call?: CallControl
           return `Calling now (task #${task.id}). A summary will be posted in the chat when the call ends.`;
         }),
     },
+    ...(smsConfigured() ? [textNumberTool(user, logEvent)] : []),
     {
       definition: {
         name: "list_tasks",
-        description: "List the user's recent call tasks with their status and results.",
+        description: "List the user's recent call and text tasks with their status and results.",
         parameters: { type: "object", properties: {}, additionalProperties: false },
       },
       run: async () => {
@@ -81,7 +86,7 @@ export function userTools(user: User, conversationId: number, call?: CallControl
       definition: {
         name: "followup_task",
         description:
-          "Follow up on an earlier call with new instructions or answers from the user. Places a new call to the same number, with the earlier objective and result in the brief.",
+          "Follow up on an earlier task with new instructions or answers from the user. For a call, places a new call to the same number with the earlier objective and result in the brief. For texts, the texting agent sends the follow-up in the same thread.",
         parameters: {
           type: "object",
           properties: {
@@ -96,6 +101,12 @@ export function userTools(user: User, conversationId: number, call?: CallControl
         guard(async () => {
           const task = await ownTask(user, input.task_id);
           const instructions = String(input.instructions);
+          if (task.kind === "sms") {
+            await checkOutboundAllowed(user, task.target_phone, "sms");
+            await logEvent(`Follow-up for text task #${task.id}`);
+            void continueTextTask(task.id, instructions).catch((err) => console.error(`Task #${task.id} follow-up failed`, err));
+            return `Following up by text (task #${task.id}). The outcome will be posted in the chat.`;
+          }
           const next = await startCallTask(user, {
             phone: task.target_phone,
             recipientName: task.target_name,
@@ -127,6 +138,40 @@ export function userTools(user: User, conversationId: number, call?: CallControl
   ];
   if (call) tools.push(endCallTool(call));
   return tools;
+}
+
+function textNumberTool(user: User, logEvent: (text: string) => Promise<unknown>): AgentTool {
+  return {
+    definition: {
+      name: "text_number",
+      description:
+        "Text a third party on the user's behalf and handle their replies. A separate agent answers their replies using only the brief you provide, and the outcome is posted to the user's chat. A footer saying you're an AI assistant texting for the user, and how to opt out, is added to the first text automatically.",
+      parameters: {
+        type: "object",
+        properties: {
+          phone: str("Phone number to text, as given by the user."),
+          recipient_name: str("Person or business being texted, or empty string if unknown."),
+          message: str("The first text to send: greet them, say who you're writing for, and ask clearly. Plain text, a few sentences at most."),
+          objective: str("What the exchange should accomplish, in one or two sentences."),
+          context: str("Self-contained brief for the agent that will answer their replies: every fact, reference number, amount and constraint it needs. It cannot see this conversation or any files."),
+        },
+        required: ["phone", "recipient_name", "message", "objective", "context"],
+        additionalProperties: false,
+      },
+    },
+    run: (input) =>
+      guard(async () => {
+        const task = await startTextTask(user, {
+          phone: String(input.phone),
+          recipientName: String(input.recipient_name ?? ""),
+          message: String(input.message ?? ""),
+          objective: String(input.objective),
+          context: String(input.context ?? ""),
+        });
+        await logEvent(`Created text task #${task.id} to ${task.target_phone}`);
+        return `Text sent (task #${task.id}). Their replies will be handled and the outcome posted in the chat.`;
+      }),
+  };
 }
 
 function endCallTool(call: CallControls): AgentTool {

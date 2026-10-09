@@ -55,6 +55,19 @@ export const config = {
   },
 
 
+  // Texting through httpSMS (https://httpsms.com): an Android phone running the
+  // httpSMS app sends and receives the texts with its own SIM, so no Twilio
+  // messaging (or A2P 10DLC registration) is involved. Off unless all three are set.
+  httpsms: {
+    apiKey: process.env.HTTPSMS_API_KEY ?? "",
+    // The Android phone's number, e.g. +15551234567. Texts go out from it.
+    phoneNumber: (process.env.HTTPSMS_PHONE_NUMBER ?? "").replace(/[^\d+]/g, ""),
+    // Signing key set on the httpSMS webhook; incoming webhooks must be signed with it.
+    webhookSigningKey: process.env.HTTPSMS_WEBHOOK_SIGNING_KEY ?? "",
+    // Change only for a self-hosted httpSMS server (or in tests).
+    apiBaseUrl: optional("HTTPSMS_API_BASE_URL", "https://api.httpsms.com").replace(/\/$/, ""),
+  },
+
   admin: {
     password: required("ADMIN_PASSWORD"),
     sessionSecret: required("SESSION_SECRET"),
@@ -92,3 +105,8 @@ export const config = {
     maxCallMinutes: Number(optional("MAX_CALL_MINUTES", "15")),
   },
 };
+
+const httpsmsSet = [config.httpsms.apiKey, config.httpsms.phoneNumber, config.httpsms.webhookSigningKey].filter(Boolean).length;
+if (httpsmsSet && httpsmsSet < 3) {
+  throw new Error("To turn on texting, set all of HTTPSMS_API_KEY, HTTPSMS_PHONE_NUMBER and HTTPSMS_WEBHOOK_SIGNING_KEY (or none of them).");
+}

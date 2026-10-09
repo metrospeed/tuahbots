@@ -41,10 +41,11 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS tasks_target_idx ON tasks (target_phone, created_at DESC);
 CREATE INDEX IF NOT EXISTS tasks_user_idx ON tasks (user_id, created_at DESC);
 
--- A single thread of communication: an invited user's web chat, a call with
--- an invited user, a call with a third party for a task, or an inbound text
--- or call from an unknown number. (user_sms/task_sms are from an earlier
--- version that texted; nothing creates them now.)
+-- A single thread of communication: an invited user's web chat (including
+-- texts they send the agent), a call with an invited user, a call or text
+-- thread with a third party for a task (task_call, task_sms), or an inbound
+-- text or call from an unknown number. (user_sms is from an earlier version;
+-- nothing creates it now.)
 CREATE TABLE IF NOT EXISTS conversations (
   id                SERIAL PRIMARY KEY,
   kind              TEXT NOT NULL,
@@ -154,3 +155,10 @@ INSERT INTO admin_auth (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
 -- Invite/reset links expire; the admin can also revoke them.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS login_token_expires_at TIMESTAMPTZ;
+
+-- Texting through httpSMS. via = 'sms' marks a line that was a text message
+-- (an invited user texting the agent shares their web chat thread). sms_id is
+-- httpSMS's message id, used to ignore repeated webhooks and match delivery failures.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS via TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS sms_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS messages_sms_id_idx ON messages (sms_id) WHERE sms_id IS NOT NULL;

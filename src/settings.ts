@@ -23,6 +23,10 @@ export interface Settings {
   timezone: string;
   /** Calls are wrapped up and hung up after this many minutes. */
   maxCallMinutes: number;
+  /** Switch for texting (only matters when httpSMS is set up): when false, no texts are sent or answered. */
+  textsEnabled: boolean;
+  /** Added to the first text the agent sends someone. Placeholders: {agent}, {requester}. */
+  textFooter: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -40,6 +44,8 @@ export const DEFAULT_SETTINGS: Settings = {
   contactHoursEnd: config.agent.contactHoursEnd,
   timezone: config.agent.timezone,
   maxCallMinutes: config.agent.maxCallMinutes,
+  textsEnabled: true,
+  textFooter: "- {agent}, an AI assistant texting for {requester}. Reply STOP to opt out.",
 };
 
 export const GREETING_PLACEHOLDERS = {
@@ -47,6 +53,8 @@ export const GREETING_PLACEHOLDERS = {
   greetingUserInbound: ["{agent}", "{caller}"],
   greetingCallback: ["{agent}", "{requester}"],
 } as const;
+
+export const TEXT_FOOTER_PLACEHOLDERS = ["{agent}", "{requester}"] as const;
 
 /** Earlier default that ended in a question; saved copies are upgraded to the new default. */
 const OLD_OUTBOUND_DEFAULT =
@@ -152,6 +160,11 @@ export function validateSettings(input: Settings): string | null {
   if (!/AI|artificial|assistant/i.test(input.greetingOutbound) || !/AI|artificial|assistant/i.test(input.greetingCallback)) {
     return "Greetings to other people must say they're talking to an AI assistant.";
   }
+  const footer = input.textFooter.trim();
+  if (!footer) return "The text footer can't be empty.";
+  if (footer.length > 200) return "Keep the text footer under 200 characters.";
+  if (!/AI|artificial|assistant/i.test(footer)) return "The text footer must say the texts come from an AI assistant.";
+  if (!/\bSTOP\b/.test(footer)) return "The text footer must say how to opt out (reply STOP).";
   const { contactHoursStart: start, contactHoursEnd: end } = input;
   if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > 24 || start >= end) {
     return "Calling hours must be whole hours with the start before the end (0–24).";

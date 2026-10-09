@@ -144,8 +144,8 @@ webRouter.get("/app/api/state", async (req, res) => {
   const user = req.user!;
   const after = Number(req.query.after ?? 0) || 0;
   const conversation = await userChatConversation(user);
-  const messages = await query<{ id: number; role: string; body: string; created_at: Date }>(
-    `SELECT id, role, body, created_at FROM messages
+  const messages = await query<{ id: number; role: string; body: string; via: string | null; created_at: Date }>(
+    `SELECT id, role, body, via, created_at FROM messages
      WHERE conversation_id = $1 AND id > $2 AND role IN ('user', 'assistant') ORDER BY id LIMIT 200`,
     [conversation.id, after],
   );
@@ -172,6 +172,7 @@ webRouter.get("/app/api/state", async (req, res) => {
     })),
     tasks: tasks.map((t) => ({
       id: t.id,
+      kind: t.kind,
       who: t.target_name || formatPhone(t.target_phone),
       status: t.status,
       objective: t.objective,

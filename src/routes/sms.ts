@@ -6,8 +6,9 @@ import { requireTwilioSignature } from "../twilio.js";
 export const smsRouter = express.Router();
 
 /**
- * The agent never sends texts (so no A2P 10DLC registration is needed), but
- * people may still text the number. Log those for the admin and don't reply.
+ * The agent never texts from the Twilio number (so no A2P 10DLC registration
+ * is needed; texting goes through httpSMS, see src/routes/httpsms.ts), but
+ * people may still text it. Log those for the admin and don't reply.
  */
 smsRouter.post("/twilio/sms", requireTwilioSignature, async (req, res) => {
   res.type("text/xml").send("<Response/>");

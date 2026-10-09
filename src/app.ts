@@ -3,6 +3,7 @@ import express from "express";
 import { adminRouter } from "./admin/routes.js";
 import { config } from "./config.js";
 import { assetsRouter, securityHeaders } from "./security.js";
+import { httpsmsRouter } from "./routes/httpsms.js";
 import { smsRouter } from "./routes/sms.js";
 import { voiceRouter } from "./routes/voice.js";
 import { handleStreamUpgrade } from "./voice/live.js";
@@ -20,6 +21,7 @@ export function createServer(): http.Server {
   app.use(assetsRouter());
   app.get("/", (_req, res) => res.redirect("/app"));
   app.use(smsRouter);
+  app.use(httpsmsRouter);
   app.use(voiceRouter);
   app.use(adminRouter);
   app.use(webRouter);
