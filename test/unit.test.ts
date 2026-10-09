@@ -6,7 +6,8 @@ const { validateInput } = await import("../src/agent/llm.js");
 const { toE164 } = await import("../src/phone.js");
 const { withLock } = await import("../src/lock.js");
 const { createRelaySession, takeRelaySession } = await import("../src/voice/sessions.js");
-const { buildRelayTwiml } = await import("../src/voice/twiml.js");
+const twimlModule = await import("../src/voice/twiml.js");
+const { buildRelayTwiml } = twimlModule;
 const { dtmfAudio, linearToMulaw } = await import("../src/voice/dtmf.js");
 const { normalizeRecording } = await import("../src/recordings.js");
 const { execFileSync, spawnSync } = await import("node:child_process");
@@ -612,4 +613,12 @@ test("text footers must disclose the AI and how to opt out", () => {
   assert.match(validateSettings({ ...DEFAULT_SETTINGS, textFooter: " " })!, /empty/);
   assert.equal(sms.messageIdFromRequestId("tuah-msg-42"), 42);
   assert.equal(sms.messageIdFromRequestId("other-42"), null);
+});
+
+test("TwiML leaves out the greeting only when it's switched off", () => {
+  const { buildStreamTwiml } = twimlModule;
+  assert.match(buildStreamTwiml("tok", "This call is recorded."), /<Say[^>]*>This call is recorded\.<\/Say><Connect/);
+  assert.doesNotMatch(buildStreamTwiml("tok", ""), /<Say/);
+  assert.doesNotMatch(buildRelayTwiml("tok", ""), /welcomeGreeting/);
+  assert.match(buildRelayTwiml("tok", "Recorded call."), /welcomeGreeting="Recorded call\."/);
 });

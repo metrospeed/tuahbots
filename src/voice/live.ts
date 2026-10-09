@@ -24,7 +24,7 @@ import { takeRelaySession, type RelaySession } from "./sessions.js";
 import { isCallOver } from "./callover.js";
 import { GoodbyeWatcher, hasWords, isAudibleMulaw, LineSound } from "./goodbye.js";
 import { finalizeCall } from "./summary.js";
-import { getSettings } from "../settings.js";
+import { getSettings, greetingMessage } from "../settings.js";
 
 /**
  * GPT-Live voice calls. Twilio Media Streams sends the caller's 8 kHz μ-law
@@ -195,7 +195,7 @@ class LiveCall {
     this.grouper.on("segment.updated", (s) => this.upsertSegment(s));
     this.grouper.on("segment.closed", ({ segment }) => this.saveSegment(segment));
     // The greeting is played by Twilio's <Say> before the audio stream starts.
-    this.transcript.push({ id: "greeting", speaker: "Assistant", text: session.greeting });
+    if (session.greeting) this.transcript.push({ id: "greeting", speaker: "Assistant", text: session.greeting });
   }
 
   get conversationId(): number {
@@ -279,7 +279,7 @@ class LiveCall {
           })
           .catch((err) => console.error("Could not start call recording", err));
       }
-      await addMessage(s.conversationId, "assistant", s.greeting);
+      await addMessage(s.conversationId, ...greetingMessage(s.greeting));
       maxCallMinutes = (await getSettings()).maxCallMinutes;
     } catch (err) {
       this.fail("Call setup bookkeeping failed", err);
@@ -297,6 +297,7 @@ class LiveCall {
   /**
    * On calls the agent placed, GPT-Live starts talking the moment the greeting
    * ends (when the audio stream attaches) instead of waiting for "hello?".
+   * With the greeting switched off, it opens every call this way.
    */
   private maybeKickoff(): void {
     if (!this.kickoff || !this.liveReady || !this.twilio) return;
@@ -350,30 +351,46 @@ class LiveCall {
     } else {
       const task = (await getTask(s.taskId))!;
       instructions = liveTaskInstructions(taskBrief(task, this.user!));
-      if (s.speakFirst) {
+      if (s.speakFirst && s.greeting) {
         instructions += `\n\n${LIVE_SPEAK_FIRST}`;
         this.kickoff = `The greeting has just finished playing. Without waiting for a reply, continue now: briefly say why you're calling (${task.objective}) and ask your first question.`;
+      } else if (s.speakFirst) {
+        this.kickoff = `The call was just answered and no greeting was played. Speak first now: say hello, who you are and who you're calling for, then briefly why you're calling (${task.objective}), and ask your first question.`;
       }
     }
+    if (!s.greeting && !this.kickoff) {
+      this.kickoff =
+        s.mode === "user"
+          ? "The caller just connected and no greeting was played. Speak first now: greet them by name briefly and ask what you can do for them."
+          : "Someone you called earlier is calling back and no greeting was played. Speak first now: say hello, who you are and who you're assisting, and ask how you can help.";
+    }
+    const opening: SessionConfig["input"] = s.greeting
+      ? [
+          {
+            role: "developer",
+            content: [
+              {
+                type: "input_text",
+                text: s.mode === "task" && s.speakFirst
+                  ? "The call was answered and this greeting, including the recording disclosure, was just played. Continue speaking immediately after it."
+                  : "The call has connected. This greeting, including the recording disclosure, was already played:",
+              },
+            ],
+          },
+          { role: "assistant", content: [{ type: "output_text", text: s.greeting }] },
+        ]
+      : [
+          {
+            role: "developer",
+            content: [{ type: "input_text", text: "The call has connected. No greeting or recording disclosure was played at the start of this call." }],
+          },
+        ];
     return {
       model: aiSettings().liveModel,
       instructions,
       audio: { format: { type: "audio/pcmu", rate: 8000 }, output: { voice: aiSettings().liveVoice } },
       delegation: { type: "client" },
-      input: [
-        {
-          role: "developer",
-          content: [
-            {
-              type: "input_text",
-              text: s.mode === "task" && s.speakFirst
-                ? "The call was answered and this greeting, including the recording disclosure, was just played. Continue speaking immediately after it."
-                : "The call has connected. This greeting, including the recording disclosure, was already played:",
-            },
-          ],
-        },
-        { role: "assistant", content: [{ type: "output_text", text: s.greeting }] },
-      ],
+      input: opening,
     };
   }
 
@@ -716,3 +733,4 @@ class LiveCall {
     setTimeout(() => finalizeCall(conversationId).catch((err) => this.fail("Call finalize failed", err)), 1000);
   }
 }
+

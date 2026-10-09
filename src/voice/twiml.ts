@@ -15,8 +15,8 @@ export function buildRelayTwiml(token: string, greeting: string): string {
   const connect = response.connect({ action: `${config.publicBaseUrl}/twilio/voice/relay-ended` });
   connect.conversationRelay({
     url: relayUrl(token),
-    welcomeGreeting: greeting,
-    welcomeGreetingInterruptible: "none",
+    // With the greeting switched off (testing), the agent answers the first thing said.
+    ...(greeting ? { welcomeGreeting: greeting, welcomeGreetingInterruptible: "none" as const } : {}),
     interruptible: "speech",
     dtmfDetection: true,
     ...(config.twilio.ttsVoice ? { voice: config.twilio.ttsVoice } : {}),
@@ -38,7 +38,8 @@ export function sayAndHangup(text: string): string {
  */
 export function buildStreamTwiml(token: string, greeting: string): string {
   const response = new twilio.twiml.VoiceResponse();
-  response.say({ voice: config.voice.disclosureVoice as any }, greeting);
+  // Skipped only when the admin switched this greeting off for testing.
+  if (greeting) response.say({ voice: config.voice.disclosureVoice as any }, greeting);
   const connect = response.connect({ action: `${config.publicBaseUrl}/twilio/voice/relay-ended` });
   const stream = connect.stream({ url: `${config.publicBaseUrl.replace(/^http/, "ws")}/twilio/stream` });
   stream.parameter({ name: "token", value: token });
