@@ -26,8 +26,19 @@ import {
   twoFactorEnrolled,
 } from "./auth.js";
 import { decryptSecret, encryptSecret, generateRecoveryCodes, generateSecret, otpauthUri, verifyTotp } from "./totp.js";
-import { codePage, esc, fmtDate, layout, loginPage, recoveryCodesPage, setCallsEnabledBanner, setupPage } from "./views.js";
-import { COMMON_TIMEZONES, DEFAULT_SETTINGS, GREETING_PLACEHOLDERS, allTimezones, getSettings, saveSettings, validateSettings, type Settings } from "../settings.js";
+import { codePage, esc, fmtDate, layout, loginPage, recoveryCodesPage, setCallsEnabledBanner, setGreetingsOffBanner, setupPage } from "./views.js";
+import {
+  COMMON_TIMEZONES,
+  DEFAULT_SETTINGS,
+  GREETING_PLACEHOLDERS,
+  allTimezones,
+  getSettings,
+  greetingsOff,
+  saveSettings,
+  validateSettings,
+  type GreetingKey,
+  type Settings,
+} from "../settings.js";
 import { twilioClient } from "../twilio.js";
 import {
   MAX_PROMPT_LENGTH,
@@ -115,7 +126,9 @@ adminRouter.post("/admin/logout", async (_req, res) => {
 
 adminRouter.use("/admin", requireAdmin);
 adminRouter.use("/admin", async (_req, _res, next) => {
-  setCallsEnabledBanner((await getSettings()).callsEnabled);
+  const settings = await getSettings();
+  setCallsEnabledBanner(settings.callsEnabled);
+  setGreetingsOffBanner(greetingsOff(settings).map(greetingLabel));
   next();
 });
 
@@ -484,12 +497,18 @@ const GREETING_FIELDS: Array<[keyof typeof GREETING_PLACEHOLDERS, string, string
   ["greetingCallback", "Other people calling back", "When someone the agent called calls the number back."],
 ];
 
+function greetingLabel(key: GreetingKey): string {
+  return GREETING_FIELDS.find(([k]) => k === key)![1];
+}
+
 function settingsPage(settings: Settings, notice = "", error = "", recoveryLeft = 0): string {
   const greetings = GREETING_FIELDS.map(
-    ([key, label, hint]) => `<fieldset><legend>${esc(label)}</legend>
+    ([key, label, hint]) => `<fieldset><legend>${esc(label)}${settings[`${key}Off`] ? ` <span class="badge bad">Off</span>` : ""}</legend>
       <textarea class="wide" name="${key}" rows="3" maxlength="600" required>${esc(settings[key])}</textarea>
       <div class="small muted">${esc(hint)} Placeholders: ${GREETING_PLACEHOLDERS[key].map((p) => `<code>${p}</code>`).join(", ")}.
-      Default: <i>${esc(DEFAULT_SETTINGS[key])}</i></div></fieldset>`,
+      Default: <i>${esc(DEFAULT_SETTINGS[key])}</i></div>
+      <label class="check"><input type="checkbox" name="${key}Off" value="1"${settings[`${key}Off`] ? " checked" : ""}>
+        Turn off for testing: these calls start with no greeting, so nobody is told the call is recorded or that it's an AI. The agent opens the call itself.</label></fieldset>`,
   ).join("");
   return layout(
     "Settings",
@@ -515,7 +534,8 @@ function settingsPage(settings: Settings, notice = "", error = "", recoveryLeft 
       </form></div>
      <form method="post" action="/admin/settings">
       <div class="card"><h3>Recording greetings</h3>
-       <p class="small muted">Played word for word at the start of every call, before the AI joins. Each one must say the call is recorded, and greetings to other people must say it's an AI assistant.</p>
+       <p class="small muted">Played word for word at the start of every call, before the AI joins. Each one must say the call is recorded, and greetings to other people must say it's an AI assistant.
+       Switching one off is for testing only: in many places, recording a call without telling everyone on it is illegal, so turn it back on before calling anyone else.</p>
        ${greetings}</div>
       <div class="card"><h3>Calling hours and time limit</h3>
        <div class="row">
@@ -585,6 +605,9 @@ adminRouter.post("/admin/settings", async (req, res) => {
     greetingOutbound: String(req.body.greetingOutbound ?? "").trim(),
     greetingUserInbound: String(req.body.greetingUserInbound ?? "").trim(),
     greetingCallback: String(req.body.greetingCallback ?? "").trim(),
+    greetingOutboundOff: req.body.greetingOutboundOff === "1",
+    greetingUserInboundOff: req.body.greetingUserInboundOff === "1",
+    greetingCallbackOff: req.body.greetingCallbackOff === "1",
     contactHoursStart: Number(req.body.contactHoursStart),
     contactHoursEnd: Number(req.body.contactHoursEnd),
     timezone: String(req.body.timezone ?? "").trim(),

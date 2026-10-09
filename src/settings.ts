@@ -9,6 +9,14 @@ export interface Settings {
   greetingOutbound: string;
   greetingUserInbound: string;
   greetingCallback: string;
+  /**
+   * For testing only: greetings switched off aren't played, so those calls
+   * start without the recording (and AI) disclosure and the agent opens the
+   * call itself.
+   */
+  greetingOutboundOff: boolean;
+  greetingUserInboundOff: boolean;
+  greetingCallbackOff: boolean;
   /** Third parties are only called between these hours (local to `timezone`). */
   contactHoursStart: number;
   contactHoursEnd: number;
@@ -25,6 +33,9 @@ export const DEFAULT_SETTINGS: Settings = {
   greetingUserInbound: "Hi {caller}, it's {agent}. Just so you know, this call is recorded and transcribed. What can I do for you?",
   greetingCallback:
     "Hi, this is {agent}, an AI assistant for {requester}, following up on our earlier call. This call is recorded and transcribed. How can I help?",
+  greetingOutboundOff: false,
+  greetingUserInboundOff: false,
+  greetingCallbackOff: false,
   contactHoursStart: config.agent.contactHoursStart,
   contactHoursEnd: config.agent.contactHoursEnd,
   timezone: config.agent.timezone,
@@ -103,6 +114,23 @@ export function allTimezones(): string[] {
 
 export async function deleteSettingValues(keys: string[]): Promise<void> {
   if (keys.length) await pool.query("DELETE FROM settings WHERE key = ANY($1)", [keys]);
+}
+
+export type GreetingKey = keyof typeof GREETING_PLACEHOLDERS;
+
+/** Greetings the admin has switched off (for testing), in display order. */
+export function greetingsOff(settings: Settings): GreetingKey[] {
+  return (Object.keys(GREETING_PLACEHOLDERS) as GreetingKey[]).filter((key) => settings[`${key}Off`]);
+}
+
+/** The greeting to play for a call, or "" if the admin switched it off. */
+export function callGreeting(settings: Settings, key: GreetingKey, values: Record<string, string>): string {
+  return settings[`${key}Off`] ? "" : fillGreeting(settings[key], values);
+}
+
+/** How a call's greeting is recorded in its transcript: what was said, or a note that it was switched off. */
+export function greetingMessage(greeting: string): ["assistant" | "event", string] {
+  return greeting ? ["assistant", greeting] : ["event", "Recording greeting is switched off in Settings; no disclosure was played"];
 }
 
 /** Fill a greeting template. Unknown placeholders are left as typed. */

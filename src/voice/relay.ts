@@ -10,7 +10,7 @@ import { addMessage, getTask, getUser, query, type User } from "../db/index.js";
 import { twilioClient } from "../twilio.js";
 import { takeRelaySession, type RelaySession } from "./sessions.js";
 import { finalizeCall } from "./summary.js";
-import { getSettings } from "../settings.js";
+import { getSettings, greetingMessage } from "../settings.js";
 
 export const relayServer = new WebSocketServer({ noServer: true });
 
@@ -72,8 +72,9 @@ class RelayCall {
       this.tools = taskCallTools(this.controls);
       this.messages.push({ role: "user", content: "[The call has connected.]" });
     }
-    this.messages.push({ role: "assistant", content: s.greeting });
-    await addMessage(s.conversationId, "assistant", s.greeting);
+    if (s.greeting) this.messages.push({ role: "assistant", content: s.greeting });
+    else this.messages.push({ role: "developer", content: "No greeting or recording disclosure was played at the start of this call. Greet the other person and introduce yourself in your first reply." });
+    await addMessage(s.conversationId, ...greetingMessage(s.greeting));
   }
 
   private send(payload: Record<string, unknown>): void {

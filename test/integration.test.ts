@@ -1417,3 +1417,69 @@ test("admin AI settings: custom endpoint over Chat Completions, keys encrypted, 
     await loadAiSettings();
   }
 });
+
+test("recording greetings can each be switched off for testing; the agent then opens the call itself", { skip: !enabled }, async () => {
+  await db.query("INSERT INTO users (name, phone) VALUES ('Quinn Quiet', '+14155550888') ON CONFLICT (phone) DO NOTHING");
+  const cookie = await login();
+  const settings = await import("../src/settings.js");
+  const current = await settings.getSettings();
+  const save = (extra: Record<string, string>) =>
+    fetch(`${base}/admin/settings`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie },
+      body: new URLSearchParams({
+        greetingOutbound: current.greetingOutbound,
+        greetingUserInbound: current.greetingUserInbound,
+        greetingCallback: current.greetingCallback,
+        contactHoursStart: String(current.contactHoursStart),
+        contactHoursEnd: String(current.contactHoursEnd),
+        timezone: current.timezone,
+        maxCallMinutes: String(current.maxCallMinutes),
+        ...extra,
+      }),
+    });
+
+  try {
+    // Only the invited-user greeting is switched off; the text is kept.
+    assert.equal((await save({ greetingUserInboundOff: "1" })).status, 302);
+    const saved = await settings.getSettings();
+    assert.equal(saved.greetingUserInboundOff, true);
+    assert.equal(saved.greetingOutboundOff, false);
+    assert.equal(saved.greetingUserInbound, current.greetingUserInbound);
+
+    // Every admin page warns while a greeting is off.
+    const page = await (await fetch(`${base}/admin/settings`, { headers: { Cookie: cookie } })).text();
+    assert.match(page, /Recording greetings are off \(testing\) for: Invited users calling the agent\./);
+    assert.match(page, /name="greetingUserInboundOff" value="1" checked/);
+    assert.doesNotMatch(page, /name="greetingOutboundOff" value="1" checked/);
+
+    // The call starts without <Say>; GPT-Live is told no disclosure was played and speaks first.
+    const { live, twilioSide } = await startLiveCall("+14155550888", "CAquiet");
+    const start = live.received.find((e) => e.type === "session.start");
+    assert.deepEqual(
+      start.session.input.map((i: any) => i.role),
+      ["developer"],
+      "no greeting is claimed to have been played",
+    );
+    assert.match(start.session.input[0].content[0].text, /No greeting or recording disclosure was played/);
+    const kickoff = live.received.find((e) => e.type === "session.commentary.append");
+    assert.match(kickoff?.content ?? "", /Speak first now: greet them by name/);
+    const conversation = await db.query("SELECT id FROM conversations WHERE call_sid = 'CAquiet'");
+    const events = await db.query("SELECT role, body FROM messages WHERE conversation_id = $1 ORDER BY id", [conversation[0].id]);
+    assert.deepEqual(events[0], { role: "event", body: "Recording greeting is switched off in Settings; no disclosure was played" });
+    twilioSide.close();
+    const xml = await (await twilioPost("/twilio/voice", { From: "+14155550888", CallSid: "CAquiet2" })).text();
+    assert.doesNotMatch(xml, /<Say/);
+    assert.match(xml, /<Stream url="wss:\/\/agent\.test\/twilio\/stream">/);
+
+    // Back on: the greeting plays again and the banner is gone.
+    assert.equal((await save({})).status, 302);
+    const again = await (await twilioPost("/twilio/voice", { From: "+14155550888", CallSid: "CAquiet3" })).text();
+    assert.match(again, /<Say[^>]*>[^<]*recorded/);
+    const cleared = await (await fetch(`${base}/admin/settings`, { headers: { Cookie: cookie } })).text();
+    assert.doesNotMatch(cleared, /Recording greetings are off/);
+  } finally {
+    await settings.saveSettings({ greetingOutboundOff: false, greetingUserInboundOff: false, greetingCallbackOff: false });
+  }
+});
