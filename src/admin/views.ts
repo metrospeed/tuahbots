@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { currentTimezone } from "../settings.js";
 
 export function esc(value: unknown): string {
   return String(value ?? "")
@@ -14,7 +15,7 @@ export function fmtDate(d: Date | null | undefined): string {
   return new Intl.DateTimeFormat("en-US", {
     dateStyle: "medium",
     timeStyle: "short",
-    timeZone: config.agent.timezone,
+    timeZone: currentTimezone(),
   }).format(d);
 }
 

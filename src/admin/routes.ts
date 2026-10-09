@@ -26,7 +26,7 @@ import {
 } from "./auth.js";
 import { decryptSecret, encryptSecret, generateRecoveryCodes, generateSecret, otpauthUri, verifyTotp } from "./totp.js";
 import { codePage, esc, fmtDate, layout, loginPage, recoveryCodesPage, setCallsEnabledBanner, setupPage } from "./views.js";
-import { DEFAULT_SETTINGS, GREETING_PLACEHOLDERS, getSettings, saveSettings, validateSettings, type Settings } from "../settings.js";
+import { COMMON_TIMEZONES, DEFAULT_SETTINGS, GREETING_PLACEHOLDERS, allTimezones, getSettings, saveSettings, validateSettings, type Settings } from "../settings.js";
 import { twilioClient } from "../twilio.js";
 import {
   MAX_PROMPT_LENGTH,
@@ -519,14 +519,21 @@ function settingsPage(settings: Settings, notice = "", error = "", recoveryLeft 
        <div class="row">
         <label>Calls allowed from (hour, 0–23)<input type="number" name="contactHoursStart" min="0" max="23" value="${settings.contactHoursStart}" required></label>
         <label>until (hour, 1–24)<input type="number" name="contactHoursEnd" min="1" max="24" value="${settings.contactHoursEnd}" required></label>
-        <label>Time zone<input name="timezone" value="${esc(settings.timezone)}" required placeholder="America/New_York"></label>
+        <label>Time zone<select name="timezone" required>${timezoneOptions(settings.timezone)}</select></label>
         <label>Call time limit (minutes)<input type="number" name="maxCallMinutes" min="1" max="60" value="${settings.maxCallMinutes}" required></label>
        </div>
-       <p class="small muted">Hours apply to calls the agent places. At the time limit the agent says goodbye and hangs up.</p></div>
+       <p class="small muted">The time zone is used for calling hours, the agent's sense of the current time, and dates shown in this admin panel. Hours apply to calls the agent places. At the time limit the agent says goodbye and hangs up.</p></div>
       <button class="primary">Save settings</button>
      </form>`,
     "/admin/settings",
   );
+}
+
+function timezoneOptions(selected: string): string {
+  const option = (zone: string) => `<option value="${esc(zone)}"${zone === selected ? " selected" : ""}>${esc(zone.replace(/_/g, " "))}</option>`;
+  const rest = allTimezones().filter((z) => !COMMON_TIMEZONES.includes(z));
+  if (!COMMON_TIMEZONES.includes(selected) && !rest.includes(selected)) rest.unshift(selected);
+  return `<optgroup label="United States">${COMMON_TIMEZONES.map(option).join("")}</optgroup><optgroup label="All time zones">${rest.map(option).join("")}</optgroup>`;
 }
 
 adminRouter.get("/admin/settings", async (req, res) => {

@@ -41,6 +41,15 @@ export const GREETING_PLACEHOLDERS = {
 const OLD_OUTBOUND_DEFAULT =
   "Hi {recipient}, this is {agent}, an AI assistant calling on behalf of {requester}. This call is being recorded and transcribed. Is now a good time for a quick question?";
 
+/**
+ * The admin's time zone, kept current by getSettings() so synchronous code
+ * (date formatting, the agent's clock line) can use it.
+ */
+let cachedTimezone = DEFAULT_SETTINGS.timezone;
+export function currentTimezone(): string {
+  return cachedTimezone;
+}
+
 export async function getSettings(): Promise<Settings> {
   const rows = await query<{ key: string; value: unknown }>("SELECT key, value FROM settings");
   const stored = Object.fromEntries(rows.map((r) => [r.key, r.value])) as Partial<Settings>;
@@ -49,11 +58,13 @@ export async function getSettings(): Promise<Settings> {
   for (const key of Object.keys(DEFAULT_SETTINGS) as Array<keyof Settings>) {
     if (stored[key] !== undefined && typeof stored[key] === typeof DEFAULT_SETTINGS[key]) (merged as any)[key] = stored[key];
   }
+  cachedTimezone = merged.timezone;
   return merged;
 }
 
 export async function saveSettings(changes: Partial<Settings>): Promise<void> {
   await saveSettingValues(changes);
+  if (typeof changes.timezone === "string") cachedTimezone = changes.timezone;
 }
 
 // Raw access to the settings table, for other admin-editable values (such as
@@ -73,6 +84,21 @@ export async function saveSettingValues(values: Record<string, unknown>): Promis
       [key, JSON.stringify(value)],
     );
   }
+}
+
+/** Time zones for the settings picker: common US ones first, then every zone the runtime knows. */
+export const COMMON_TIMEZONES = [
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Phoenix",
+  "America/Los_Angeles",
+  "America/Anchorage",
+  "Pacific/Honolulu",
+];
+export function allTimezones(): string[] {
+  const zones = Intl.supportedValuesOf("timeZone");
+  return zones.includes("UTC") ? zones : ["UTC", ...zones];
 }
 
 export async function deleteSettingValues(keys: string[]): Promise<void> {

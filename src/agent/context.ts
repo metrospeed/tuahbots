@@ -1,8 +1,7 @@
-import { config } from "../config.js";
 import type { ContentPart, InputItem } from "./llm.js";
 import { listMessages, query, type Attachment, type Message, type Task, type User } from "../db/index.js";
 import { formatPhone } from "../phone.js";
-import { getSettings } from "../settings.js";
+import { currentTimezone, getSettings } from "../settings.js";
 import { describeTask, recentTasks, userChatConversation } from "../tasks.js";
 
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
@@ -10,12 +9,13 @@ const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp
 const MAX_ATTACHMENTS_IN_CONTEXT = 4;
 
 export function nowLine(): string {
+  const timeZone = currentTimezone();
   const now = new Intl.DateTimeFormat("en-US", {
     dateStyle: "full",
     timeStyle: "short",
-    timeZone: config.agent.timezone,
+    timeZone,
   }).format(new Date());
-  return `Current time: ${now} (${config.agent.timezone}).`;
+  return `Current time: ${now} (${timeZone}).`;
 }
 
 export async function userDetails(user: User): Promise<string> {
