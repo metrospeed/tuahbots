@@ -84,3 +84,7 @@ TEST_DATABASE_URL=postgres://... npm test
 - **AI voice calls (US)**: the FCC treats AI-generated voices as "artificial voice" under the TCPA. Calls to **cell phones** with an artificial voice generally need the called party's prior consent, unless they fall under an exemption such as emergencies. Calling businesses about an existing transaction (like a quote they sent) is lower risk than calling consumers, but it is not risk-free. Some states have their own AI-disclosure laws. Talk to a lawyer about how your users will use this.
 - **Recording consent**: the greeting announces recording before anyone else speaks, which covers all-party-consent states such as California and Florida in most cases. Keep that greeting.
 - You're responsible for what invited users ask the agent to do. Only invite people you trust, and review transcripts.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

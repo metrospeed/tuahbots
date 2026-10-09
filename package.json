@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Invite-only AI phone agent: SMS and voice, with outbound calls/texts on behalf of invited users and an admin transcript panel.",
+  "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
