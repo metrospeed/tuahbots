@@ -143,8 +143,9 @@ export class GoodbyeWatcher {
   private callerBye = false;
   /** After the agent's goodbye the other side said something more; the agent hasn't answered yet ("Mhm" doesn't count). */
   private answerOwed = false;
-  /** When the agent last said a farewell. */
+  /** When the agent, and the other side, last said a farewell. */
   private agentFarewellAt = -Infinity;
+  private callerFarewellAt = -Infinity;
   /** The agent is relaying a result after its goodbye; that doesn't take the goodbye back. */
   private relaying = false;
   /** When the goodbye became pending; pushed back when the other side adds something. */
@@ -210,6 +211,7 @@ export class GoodbyeWatcher {
     }
     if (farewell) {
       this.callerBye = true;
+      this.callerFarewellAt = now;
       this.pending(now);
     } else if (substantive) {
       this.callerBye = false;
@@ -250,10 +252,9 @@ export class GoodbyeWatcher {
     return this.byeAt !== null && (this.agentBye || this.callerBye);
   }
 
-  /** The call isn't over after all (see callover.ts): forget the goodbye; a new one is needed. */
-  reset(): void {
-    this.agentBye = this.callerBye = this.answerOwed = this.relaying = false;
-    this.byeAt = this.firstByeAt = null;
+  /** When either side last said a farewell. */
+  get lastFarewellAt(): number {
+    return Math.max(this.agentFarewellAt, this.callerFarewellAt);
   }
 
   /** True once a goodbye has been said and the line has gone quiet, or a time limit has passed. */

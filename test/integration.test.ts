@@ -18,7 +18,7 @@ const openAIRequests: any[] = [];
  * Tests can make the agent model slow, answer a call's delegation with text
  * instead of end_call, or change its answer to "is this call over?".
  */
-const fakeAgent = { delayMs: 0, reply: null as string | null, callOver: "OVER" };
+const fakeAgent = { delayMs: 0, reply: null as string | null, callOver: "OVER", callOverDelayMs: 0 };
 const fakeOpenAI = http.createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
@@ -26,8 +26,11 @@ const fakeOpenAI = http.createServer((req, res) => {
     const request = JSON.parse(body || "{}");
     if (String(request.instructions ?? "").startsWith("You check whether a phone call is finished")) {
       openAIRequests.push(request);
-      const response = { id: "resp_over", object: "response", created_at: 0, status: "completed", model: request.model, output: [textMessage(fakeAgent.callOver)], error: null, incomplete_details: null };
-      return void res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response));
+      const unknown = unknownInputField(request);
+      if (unknown) return rejectUnknown(res, unknown);
+      const answer = fakeAgent.callOver;
+      const response = { id: "resp_over", object: "response", created_at: 0, status: "completed", model: request.model, output: [textMessage(answer)], error: null, incomplete_details: null };
+      return void setTimeout(() => res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response)), fakeAgent.callOverDelayMs);
     }
     setTimeout(() => answer(request), fakeAgent.delayMs);
   });
@@ -1203,5 +1206,37 @@ test("before hanging up on a goodbye, the agent model confirms the call is over"
     u.twilioSide.close();
   } finally {
     fakeAgent.callOver = "OVER";
+  }
+});
+
+test("an answer about a conversation that moved on is ignored; long turns reach the check whole at the end", { skip: !enabled }, async () => {
+  await db.query("INSERT INTO users (name, phone) VALUES ('Rita Race', '+14155550781') ON CONFLICT (phone) DO NOTHING");
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const overChecks = () => openAIRequests.filter((r) => String(r.instructions ?? "").startsWith("You check whether a phone call is finished"));
+  try {
+    // The caller starts a new request while the (slow) check is out: its OVER mustn't hang up on them.
+    fakeAgent.callOverDelayMs = 2500;
+    const before = overChecks().length;
+    const r = await startLiveCall("+14155550781", "CArace1");
+    r.send({ type: "session.output_transcript.delta", event_id: "r1", delta: "All set, Rita. Goodbye!", start_ms: 1000, end_ms: 2000 });
+    for (let i = 0; i < 80 && overChecks().length === before; i++) await sleep(100);
+    assert.equal(overChecks().length, before + 1, "the check was asked");
+    r.send({ type: "session.input_transcript.delta", event_id: "r2", delta: "Oh wait, one more thing, can you also text me the address?", start_ms: 8000, end_ms: 10000 });
+    await sleep(4000);
+    assert.ok(!r.toCaller.some((m) => m.event === "mark"), "no hang-up on the new request");
+    r.twilioSide.close();
+
+    // A long last turn: the check sees how it ends.
+    fakeAgent.callOverDelayMs = 0;
+    const long = `Great, so just to confirm: ${"a table for four on Saturday at seven, under the name Lena, with a window seat if possible, ".repeat(5)}thank you so much for your help, have a wonderful evening. Goodbye!`;
+    const l = await startLiveCall("+14155550781", "CArace2");
+    const n = overChecks().length;
+    l.send({ type: "session.output_transcript.delta", event_id: "l1", delta: long, start_ms: 1000, end_ms: 20000 });
+    for (let i = 0; i < 80 && overChecks().length === n; i++) await sleep(100);
+    assert.match(overChecks()[n]?.input ?? "", /have a wonderful evening\. Goodbye!/);
+    assert.match(overChecks()[n]?.input ?? "", /quiet for \d+ seconds/);
+    l.twilioSide.close();
+  } finally {
+    fakeAgent.callOverDelayMs = 0;
   }
 });

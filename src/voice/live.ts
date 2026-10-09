@@ -52,8 +52,15 @@ const SILENT_GOODBYE_MS = 8_000;
 const MAX_ASKED_GOODBYE_MS = 20_000;
 /** After the goodbye watcher fires, the agent is done; don't wait long for audible noise to stop. */
 const MAX_AFTER_GOODBYE_MS = 8_000;
-/** Before asking whether the call is over, wait up to this long for the agent to stop talking. */
-const CHECK_WAITS_FOR_SPEECH_MS = 20_000;
+/** Ask whether the call is over only once the agent's words have stopped this long... */
+const AGENT_DONE_MS = 1_500;
+/** ...and its audio too, unless that keeps going this long after its last word (audible noise). */
+const AGENT_AUDIO_TRAIL_MS = 4_000;
+/** After a "not over", ask again after this much more quiet (doubling, up to RECHECK_MAX_MS), or sooner on a new goodbye. */
+const RECHECK_MS = 25_000;
+const RECHECK_MAX_MS = 120_000;
+/** Stop asking after this many "not over"s; the idle hang-up and the time limit still apply. */
+const MAX_NOT_OVER = 6;
 /** A goodbye never ends the call while the agent is doing something for the caller, unless that takes longer than this. */
 const DELEGATION_HOLD_MAX_MS = 60_000;
 /** If the mark never comes back, hang up anyway after this long. */
@@ -168,8 +175,21 @@ class LiveCall {
   private delegationStartedAt = 0;
   /** Asking the agent model whether the call is really over. */
   private confirmingGoodbye = false;
-  /** When the goodbye watcher first said the call looked over (0 = it doesn't). */
-  private looksOverSince = 0;
+  /**
+   * Bumped by worded transcript fragments (the agent's and the other side's)
+   * and by delegations, to spot answers about a conversation that has moved on.
+   */
+  private agentActivity = 0;
+  private callerActivity = 0;
+  /** Answers in a row set aside because the other side kept talking (a noisy line can do this forever). */
+  private staleAnswers = 0;
+  private lastWordsAt = 0;
+  private lastAgentWordsAt = 0;
+  /** After a "not over" (or no answer): don't ask again before this, unless there's a new goodbye. */
+  private checkNotBefore = 0;
+  private checkedFarewellAt = -Infinity;
+  private notOverCount = 0;
+  private noAnswerCount = 0;
 
   constructor(private session: RelaySession) {
     this.goodbye = new GoodbyeWatcher();
@@ -390,16 +410,23 @@ class LiveCall {
         this.sendTwilio({ event: "media", media: { payload: event.delta } });
         break;
       case "session.input_transcript.delta":
-        if (hasWords(event.delta)) this.lastActivityAt = Date.now();
+        if (hasWords(event.delta)) {
+          this.lastActivityAt = this.lastWordsAt = Date.now();
+          this.callerActivity++;
+        }
         if (this.twilio) this.goodbye.callerSaid(event.delta, Date.now());
         if (!this.transcriptDone) this.grouper.push(event);
         break;
       case "session.output_transcript.delta":
-        if (event.delta.trim()) this.lastActivityAt = Date.now();
+        if (event.delta.trim()) {
+          this.lastActivityAt = this.lastWordsAt = this.lastAgentWordsAt = Date.now();
+          this.agentActivity++;
+        }
         if (this.twilio) this.goodbye.agentSaid(event.delta, Date.now());
         if (!this.transcriptDone) this.grouper.push(event);
         break;
       case "session.delegation.created":
+        this.agentActivity++;
         this.queueDelegation(event.delegation.id);
         break;
       case "session.closed":
@@ -442,36 +469,63 @@ class LiveCall {
     // "Okay, I'll take care of it" while the backend works must never cancel the errand.
     if (this.busyWithRequest()) return;
     const now = Date.now();
-    if (!this.goodbye.isOver(now)) {
-      this.looksOverSince = 0;
+    if (!this.goodbye.pendingGoodbye) {
+      this.checkNotBefore = this.notOverCount = this.noAnswerCount = this.staleAnswers = 0;
+      this.checkedFarewellAt = -Infinity;
       return;
     }
-    this.looksOverSince ||= now;
+    if (!this.goodbye.isOver(now)) return;
+    // After a "not over", wait for more quiet or a new goodbye before asking again.
+    if (now < this.checkNotBefore && this.goodbye.lastFarewellAt <= this.checkedFarewellAt) return;
+    if (this.notOverCount >= MAX_NOT_OVER) return;
     // Let the agent finish what it's saying first, so the check sees all of it (e.g. a question at the end).
-    if (now - this.lastOutputAt < SPEECH_SETTLE_MS && now - this.looksOverSince < CHECK_WAITS_FOR_SPEECH_MS) return;
-    const who = this.goodbye.endedBy === "agent" ? "Agent" : "The other side";
+    const sinceAgentWords = now - this.lastAgentWordsAt;
+    if (sinceAgentWords < AGENT_DONE_MS) return;
+    if (now - this.lastOutputAt < SPEECH_SETTLE_MS && sinceAgentWords < AGENT_AUDIO_TRAIL_MS) return;
+
     // The words alone can't tell a real ending from a transfer ("have a great day, transferring you
     // now") or a goodbye followed by a question; the agent model reads the transcript and decides.
+    const who = this.goodbye.endedBy === "agent" ? "Agent" : "The other side";
+    const agentAsked = this.agentActivity;
+    const callerAsked = this.callerActivity;
+    const farewellAt = this.goodbye.lastFarewellAt;
     this.confirmingGoodbye = true;
     const transcript = this.transcript
       .slice(-20)
-      .map((l) => `${l.speaker}: ${l.text.slice(0, 400)}`)
+      .map((l) => `${l.speaker}: ${l.text.length > 600 ? `…${l.text.slice(-600)}` : l.text}`)
       .join("\n");
-    isCallOver(transcript, this.abort.signal)
+    isCallOver(transcript, Math.round((now - this.lastWordsAt) / 1000), this.abort.signal)
       .then((over) => {
         this.confirmingGoodbye = false;
         if (this.finishing || this.closed) return;
+        // The agent spoke or started on something while we were asking: the answer is about a
+        // conversation that has moved on. The next tick asks again if the call still looks over.
+        if (this.agentActivity !== agentAsked || this.busyWithRequest() || !this.goodbye.pendingGoodbye) return;
+        const later = Date.now();
+        // The other side said something meanwhile: ask again with it ("oh wait, one more thing"),
+        // unless they never stop (a TV or noise transcribed as words), then go with the answer.
+        if (this.callerActivity !== callerAsked && this.staleAnswers++ < 2) {
+          this.checkedFarewellAt = farewellAt;
+          this.checkNotBefore = later + 2000;
+          return;
+        }
+        this.staleAnswers = 0;
         if (over === false) {
+          this.notOverCount++;
+          this.checkedFarewellAt = farewellAt;
+          this.checkNotBefore = later + Math.min(RECHECK_MAX_MS, RECHECK_MS * 2 ** (this.notOverCount - 1));
           console.log(`Call ${this.callSid}: goodbye heard, but the conversation isn't over; staying on`);
           addMessage(this.session.conversationId, "event", "Goodbye heard, but the conversation isn't over (e.g. a transfer or a question); staying on").catch((err) =>
             this.fail("Saving event failed", err),
           );
-          this.goodbye.reset();
-          this.looksOverSince = 0;
           return;
         }
-        // Someone carried on while we were checking.
-        if (!this.goodbye.pendingGoodbye) return;
+        if (over === null && this.noAnswerCount++ === 0) {
+          // No usable answer: try once more before deciding without one.
+          this.checkedFarewellAt = farewellAt;
+          this.checkNotBefore = later + 2000;
+          return;
+        }
         const note = over === null ? " (couldn't double-check, hanging up anyway)" : "";
         console.log(`Call ${this.callSid}: ${who.toLowerCase()} said goodbye; hanging up${note}`);
         addMessage(this.session.conversationId, "event", `${who} said goodbye; hanging up${note}`).catch((err) => this.fail("Saving event failed", err));

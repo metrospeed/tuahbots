@@ -443,20 +443,15 @@ test("goodbye detection: someone else's plans or advice aren't the agent's goodb
   }
 });
 
-test("goodbye watcher: reset() forgets a goodbye the call-over check rejected", () => {
+test("goodbye watcher: lastFarewellAt tracks the newest goodbye from either side", () => {
   const w = new GoodbyeWatcher();
-  w.callerSaid("Okay, I'm going to transfer you to billing now. Have a great day!", 0);
-  w.agentSaid("Thank you! You have a great day too.", 1000);
+  assert.equal(w.lastFarewellAt, -Infinity);
+  w.callerSaid("Okay, I'm going to transfer you to billing now. Have a great day!", 1000);
+  assert.equal(w.lastFarewellAt, 1000);
+  w.agentSaid("Thank you! You have a great day too.", 2000);
+  assert.equal(w.lastFarewellAt, 2000);
   assert.equal(w.pendingGoodbye, true);
-  assert.equal(w.isOver(1000 + GOODBYE_QUIET_MS), true, "looks over from the words alone");
-  w.reset();
-  assert.equal(w.pendingGoodbye, false);
-  assert.equal(w.isOver(120_000), false, "a new goodbye is needed");
-  w.callerSaid("Billing here, all sorted. Bye now.", 130_000);
-  w.agentSaid("Thanks, goodbye!", 131_000);
-  assert.equal(w.isOver(131_000 + GOODBYE_QUIET_MS), true);
 });
-
 test("goodbye detection: passing a message on, then saying goodbye, is a goodbye", () => {
   for (const said of ["Okay, I'll tell him, thank you, goodbye.", "Perfect, I'll tell Mark, thanks so much for your help, goodbye!", "Okay, I'll remind him, thanks, bye!"]) {
     assert.ok(endsWithFarewell(said), said);
