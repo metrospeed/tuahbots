@@ -14,11 +14,27 @@ const enabled = !!process.env.TEST_DATABASE_URL;
 // the app's failure handling is exercised too. Responses API requests are kept
 // so tests can check the instructions the app sent.
 const openAIRequests: any[] = [];
+/**
+ * Tests can make the agent model slow, answer a call's delegation with text
+ * instead of end_call, or change its answer to "is this call over?".
+ */
+const fakeAgent = { delayMs: 0, reply: null as string | null, callOver: "OVER", callOverDelayMs: 0 };
 const fakeOpenAI = http.createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
   req.on("end", () => {
     const request = JSON.parse(body || "{}");
+    if (String(request.instructions ?? "").startsWith("You check whether a phone call is finished")) {
+      openAIRequests.push(request);
+      const unknown = unknownInputField(request);
+      if (unknown) return rejectUnknown(res, unknown);
+      const answer = fakeAgent.callOver;
+      const response = { id: "resp_over", object: "response", created_at: 0, status: "completed", model: request.model, output: [textMessage(answer)], error: null, incomplete_details: null };
+      return void setTimeout(() => res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(response)), fakeAgent.callOverDelayMs);
+    }
+    setTimeout(() => answer(request), fakeAgent.delayMs);
+  });
+  const answer = (request: any) => {
     openAIRequests.push(request);
     const tools: string[] = (request.tools ?? []).map((t: any) => t.name);
     // Summaries send a plain-string input; tool loops send a list of items.
@@ -26,8 +42,9 @@ const fakeOpenAI = http.createServer((req, res) => {
     const unknown = unknownInputField(request);
     if (unknown) return rejectUnknown(res, unknown);
     if (!tools.includes("end_call")) return void res.writeHead(400).end(JSON.stringify({ error: { message: "test" } }));
+    if (fakeAgent.reply !== null) return sendResponseStream(res, request.model, [textMessage(fakeAgent.reply)]);
     sendResponseStream(res, request.model, answered ? [textMessage("Ending the call.")] : [functionCall("end_call", { reason: "done" })]);
-  });
+  };
 });
 const fakeLive = new WebSocketServer({ server: fakeOpenAI });
 
@@ -1095,4 +1112,131 @@ test("the call hangs up after the agent says goodbye, even without a hang-up del
   await sleep(4500);
   assert.ok(!b.toCaller.some((m) => m.event === "mark"), "no hang-up while the caller is still talking business");
   b.twilioSide.close();
+});
+
+test("the call still hangs up when GPT-Live keeps streaming silence and noise after the goodbye", { skip: !enabled }, async () => {
+  await db.query("INSERT INTO users (name, phone) VALUES ('Sam Silence', '+14155550778') ON CONFLICT (phone) DO NOTHING");
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const c = await startLiveCall("+14155550778", "CAbye3");
+  const closedByServer = new Promise<void>((resolve) => c.twilioSide.on("close", () => resolve()));
+  c.send({ type: "session.output_transcript.delta", event_id: "c1", delta: "All set, Sam. Goodbye!", start_ms: 1000, end_ms: 2000 });
+  // Silent 20 ms frames, as a full-duplex model streams between turns, plus line noise transcribed as text.
+  const silence = Buffer.alloc(160, 0xff).toString("base64");
+  const stream = setInterval(() => c.send({ type: "session.output_audio.delta", delta: silence }), 20);
+  let n = 0;
+  const noise = setInterval(() => c.send({ type: "session.input_transcript.delta", event_id: `noise${n++}`, delta: ".", start_ms: 3000 + n, end_ms: 3001 + n }), 700);
+  try {
+    let mark: any;
+    for (let i = 0; i < 100 && !(mark = c.toCaller.find((m) => m.event === "mark")); i++) await sleep(100);
+    assert.equal(mark?.mark.name, "hangup", "asks Twilio to report when the goodbye has played");
+  } finally {
+    clearInterval(stream);
+    clearInterval(noise);
+  }
+  c.twilioSide.send(JSON.stringify({ event: "mark", streamSid: "MZCAbye3", mark: { name: "hangup" } }));
+  // The REST hang-up can't reach Twilio from tests, so this also shows the second path: we end the stream ourselves.
+  await Promise.race([closedByServer, sleep(6000).then(() => assert.fail("the server didn't end the call's audio stream"))]);
+  assert.ok(c.live.received.some((e) => e.type === "session.close"));
+  const conversation = (await db.query("SELECT id FROM conversations WHERE call_sid = 'CAbye3'"))[0];
+  const events = (await db.query("SELECT body FROM messages WHERE conversation_id = $1 AND role = 'event'", [conversation.id])).map((r: any) => r.body);
+  assert.ok(events.includes("Agent said goodbye; hanging up"), events.join(" | "));
+});
+
+test("a goodbye said while the agent is still working on a request doesn't end the call until the result is in", { skip: !enabled }, async () => {
+  await db.query("INSERT INTO users (name, phone) VALUES ('Ed Errand', '+14155550779') ON CONFLICT (phone) DO NOTHING");
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  fakeAgent.delayMs = 6000;
+  fakeAgent.reply = "Done: I called the dentist and moved the cleaning to Friday.";
+  try {
+    const d = await startLiveCall("+14155550779", "CAbye4");
+    d.send({ type: "session.input_transcript.delta", event_id: "d1", delta: "Move my cleaning to Friday, thanks, bye!", start_ms: 1000, end_ms: 2000 });
+    d.send({ type: "session.output_transcript.delta", event_id: "d2", delta: "Will do, bye!", start_ms: 2100, end_ms: 2600 });
+    d.send({ type: "session.delegation.created", event_id: "d3", offset_ms: 2700, delegation: { id: "del_errand", target: "client", type: "delegation" } });
+    await sleep(5000);
+    assert.ok(!d.toCaller.some((m) => m.event === "mark"), "no hang-up while the request is being handled");
+    // The result reaches GPT-Live to relay; if it then stays quiet, the call ends.
+    for (let i = 0; i < 40 && !d.live.received.some((e) => e.type === "session.commentary.append" && e.delegation_id === "del_errand"); i++) await sleep(100);
+    assert.ok(d.live.received.some((e) => e.type === "session.commentary.append" && e.delegation_id === "del_errand"), "result relayed");
+    let mark: any;
+    for (let i = 0; i < 80 && !(mark = d.toCaller.find((m) => m.event === "mark")); i++) await sleep(100);
+    assert.equal(mark?.mark.name, "hangup");
+    d.twilioSide.close();
+  } finally {
+    fakeAgent.delayMs = 0;
+    fakeAgent.reply = null;
+  }
+});
+
+test("before hanging up on a goodbye, the agent model confirms the call is over", { skip: !enabled }, async () => {
+  await db.query("INSERT INTO users (name, phone) VALUES ('Tia Transfer', '+14155550780') ON CONFLICT (phone) DO NOTHING");
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const overChecks = () => openAIRequests.filter((r) => String(r.instructions ?? "").startsWith("You check whether a phone call is finished"));
+  const checksBefore = overChecks().length;
+  try {
+    // A receptionist's goodbye while transferring: the model says it isn't over, so the call stays up.
+    fakeAgent.callOver = "CONTINUE";
+    const t = await startLiveCall("+14155550780", "CAbye5");
+    t.send({ type: "session.input_transcript.delta", event_id: "t1", delta: "Okay, I'm going to transfer you to billing now. Have a great day!", start_ms: 1000, end_ms: 3000 });
+    await sleep(300);
+    t.send({ type: "session.output_transcript.delta", event_id: "t2", delta: "Thank you! You have a great day too.", start_ms: 3200, end_ms: 4500 });
+    await sleep(6000);
+    assert.ok(!t.toCaller.some((m) => m.event === "mark"), "no hang-up during the transfer");
+    const check = overChecks().slice(checksBefore)[0];
+    assert.ok(check, "the model was asked");
+    assert.match(check.input, /transfer you to billing/);
+    // Later the agent really does say goodbye, and this time it is over.
+    fakeAgent.callOver = "OVER";
+    t.send({ type: "session.input_transcript.delta", event_id: "t3", delta: "Billing here. That's all sorted, bye now.", start_ms: 20000, end_ms: 22000 });
+    await sleep(300);
+    t.send({ type: "session.output_transcript.delta", event_id: "t4", delta: "Thanks so much, goodbye!", start_ms: 22200, end_ms: 23000 });
+    let mark: any;
+    for (let i = 0; i < 80 && !(mark = t.toCaller.find((m) => m.event === "mark")); i++) await sleep(100);
+    assert.equal(mark?.mark.name, "hangup");
+    t.twilioSide.close();
+
+    // No usable answer: hang up anyway, and say so in the call log.
+    fakeAgent.callOver = "Hmm, hard to say.";
+    const u = await startLiveCall("+14155550780", "CAbye6");
+    u.send({ type: "session.output_transcript.delta", event_id: "u1", delta: "All set. Goodbye!", start_ms: 1000, end_ms: 2000 });
+    for (let i = 0; i < 80 && !(mark = u.toCaller.find((m) => m.event === "mark")); i++) await sleep(100);
+    assert.equal(mark?.mark.name, "hangup");
+    const conversation = (await db.query("SELECT id FROM conversations WHERE call_sid = 'CAbye6'"))[0];
+    const events = (await db.query("SELECT body FROM messages WHERE conversation_id = $1 AND role = 'event'", [conversation.id])).map((r: any) => r.body);
+    assert.ok(events.some((e: string) => e.includes("couldn't double-check")), events.join(" | "));
+    u.twilioSide.close();
+  } finally {
+    fakeAgent.callOver = "OVER";
+  }
+});
+
+test("an answer about a conversation that moved on is ignored; long turns reach the check whole at the end", { skip: !enabled }, async () => {
+  await db.query("INSERT INTO users (name, phone) VALUES ('Rita Race', '+14155550781') ON CONFLICT (phone) DO NOTHING");
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const overChecks = () => openAIRequests.filter((r) => String(r.instructions ?? "").startsWith("You check whether a phone call is finished"));
+  try {
+    // The caller starts a new request while the (slow) check is out: its OVER mustn't hang up on them.
+    fakeAgent.callOverDelayMs = 2500;
+    const before = overChecks().length;
+    const r = await startLiveCall("+14155550781", "CArace1");
+    r.send({ type: "session.output_transcript.delta", event_id: "r1", delta: "All set, Rita. Goodbye!", start_ms: 1000, end_ms: 2000 });
+    for (let i = 0; i < 80 && overChecks().length === before; i++) await sleep(100);
+    assert.equal(overChecks().length, before + 1, "the check was asked");
+    r.send({ type: "session.input_transcript.delta", event_id: "r2", delta: "Oh wait, one more thing, can you also text me the address?", start_ms: 8000, end_ms: 10000 });
+    await sleep(4000);
+    assert.ok(!r.toCaller.some((m) => m.event === "mark"), "no hang-up on the new request");
+    r.twilioSide.close();
+
+    // A long last turn: the check sees how it ends.
+    fakeAgent.callOverDelayMs = 0;
+    const long = `Great, so just to confirm: ${"a table for four on Saturday at seven, under the name Lena, with a window seat if possible, ".repeat(5)}thank you so much for your help, have a wonderful evening. Goodbye!`;
+    const l = await startLiveCall("+14155550781", "CArace2");
+    const n = overChecks().length;
+    l.send({ type: "session.output_transcript.delta", event_id: "l1", delta: long, start_ms: 1000, end_ms: 20000 });
+    for (let i = 0; i < 80 && overChecks().length === n; i++) await sleep(100);
+    assert.match(overChecks()[n]?.input ?? "", /have a wonderful evening\. Goodbye!/);
+    assert.match(overChecks()[n]?.input ?? "", /quiet for \d+ seconds/);
+    l.twilioSide.close();
+  } finally {
+    fakeAgent.callOverDelayMs = 0;
+  }
 });

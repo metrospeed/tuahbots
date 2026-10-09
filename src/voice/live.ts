@@ -21,7 +21,8 @@ import { addMessage, getTask, getUser, query, type User } from "../db/index.js";
 import { twilioClient } from "../twilio.js";
 import { dtmfAudio } from "./dtmf.js";
 import { takeRelaySession, type RelaySession } from "./sessions.js";
-import { GoodbyeWatcher } from "./goodbye.js";
+import { isCallOver } from "./callover.js";
+import { GoodbyeWatcher, hasWords, isAudibleMulaw, LineSound } from "./goodbye.js";
 import { finalizeCall } from "./summary.js";
 import { getSettings } from "../settings.js";
 
@@ -45,8 +46,31 @@ const PREWARM_TTL_MS = 90_000;
 const SPEECH_SETTLE_MS = 800;
 /** Upper bound on waiting for a goodbye to finish before hanging up anyway. */
 const MAX_GOODBYE_MS = 15_000;
+/** When GPT-Live is asked to say goodbye but doesn't (and goes quiet), hang up after this much silence anyway. */
+const SILENT_GOODBYE_MS = 8_000;
+/** Upper bound on waiting for GPT-Live to say a goodbye it was asked for. */
+const MAX_ASKED_GOODBYE_MS = 20_000;
+/** After the goodbye watcher fires, the agent is done; don't wait long for audible noise to stop. */
+const MAX_AFTER_GOODBYE_MS = 8_000;
+/** Ask whether the call is over only once the agent's words have stopped this long... */
+const AGENT_DONE_MS = 1_500;
+/** ...and its audio too, unless that keeps going this long after its last word (audible noise). */
+const AGENT_AUDIO_TRAIL_MS = 4_000;
+/** After a "not over", ask again after this much more quiet (doubling, up to RECHECK_MAX_MS), or sooner on a new goodbye. */
+const RECHECK_MS = 25_000;
+const RECHECK_MAX_MS = 120_000;
+/** Stop asking after this many "not over"s; the idle hang-up and the time limit still apply. */
+const MAX_NOT_OVER = 6;
+/** A goodbye never ends the call while the agent is doing something for the caller, unless that takes longer than this. */
+const DELEGATION_HOLD_MAX_MS = 60_000;
+/** If the mark never comes back, hang up anyway after this long. */
+const MARK_TIMEOUT_MS = 8_000;
+/** How long the REST hang-up gets before we also end the call's audio stream. */
+const REST_HANGUP_GRACE_MS = 3_000;
 /** End the call if nobody has spoken for this long. */
 const IDLE_HANGUP_MS = 45_000;
+/** Calls placed for a task often wait on hold or while someone checks something. */
+const TASK_IDLE_HANGUP_MS = 3 * 60_000;
 
 /**
  * GPT-Live sessions started while Twilio plays the greeting, keyed by the
@@ -134,15 +158,41 @@ class LiveCall {
   private abort = new AbortController();
   private endRequested = false;
   private hangingUp = false;
+  /** A hang-up was asked for before Twilio's audio stream arrived. */
+  private hangUpWhenAttached = false;
   private closed = false;
   private timers: NodeJS.Timeout[] = [];
   private lastOutputAt = 0;
   private lastActivityAt = Date.now();
   private finishing = false;
   /** Hangs up after a goodbye, even if GPT-Live never delegates "hang up". */
-  private goodbye = new GoodbyeWatcher();
+  private goodbye: GoodbyeWatcher;
+  /** Hold music or someone talking on the other end keeps the idle hang-up away. */
+  private lineSound = new LineSound();
+  private lastLineSoundAt = 0;
+  /** Tasks the agent backend is working on for the call, and when the current one started. */
+  private delegationsInFlight = 0;
+  private delegationStartedAt = 0;
+  /** Asking the agent model whether the call is really over. */
+  private confirmingGoodbye = false;
+  /**
+   * Bumped by worded transcript fragments (the agent's and the other side's)
+   * and by delegations, to spot answers about a conversation that has moved on.
+   */
+  private agentActivity = 0;
+  private callerActivity = 0;
+  /** Answers in a row set aside because the other side kept talking (a noisy line can do this forever). */
+  private staleAnswers = 0;
+  private lastWordsAt = 0;
+  private lastAgentWordsAt = 0;
+  /** After a "not over" (or no answer): don't ask again before this, unless there's a new goodbye. */
+  private checkNotBefore = 0;
+  private checkedFarewellAt = -Infinity;
+  private notOverCount = 0;
+  private noAnswerCount = 0;
 
   constructor(private session: RelaySession) {
+    this.goodbye = new GoodbyeWatcher();
     this.grouper.on("segment.updated", (s) => this.upsertSegment(s));
     this.grouper.on("segment.closed", ({ segment }) => this.saveSegment(segment));
     // The greeting is played by Twilio's <Say> before the audio stream starts.
@@ -178,7 +228,10 @@ class LiveCall {
     endCall: () => {
       this.endRequested = true;
     },
-    pressDigits: (digits) => this.playToCaller(dtmfAudio(digits)),
+    pressDigits: (digits) => {
+      this.lastActivityAt = Date.now();
+      this.playToCaller(dtmfAudio(digits));
+    },
   };
 
   private fail(context: string, err: unknown): void {
@@ -196,36 +249,47 @@ class LiveCall {
     ws.on("close", () => this.shutdown());
     ws.on("error", (err) => console.error("Twilio stream socket error", err));
     this.lastActivityAt = Date.now();
+    // Started before anything that could fail, so a call can always end itself.
+    this.timers.push(
+      setInterval(() => this.checkGoodbye(), 250),
+      setInterval(() => {
+        // Sound on the line with no words (hold music, a TV) stretches a user call's idle limit, but not forever.
+        const lineBusy = Date.now() - this.lastLineSoundAt < 5000;
+        const idleLimit = this.session.mode === "task" || lineBusy ? TASK_IDLE_HANGUP_MS : IDLE_HANGUP_MS;
+        if (Date.now() - this.lastActivityAt < idleLimit || this.finishing || this.busyWithRequest()) return;
+        this.instruct("Nobody has said anything for a while. Say a brief goodbye.");
+        this.finishAfterSpeech(true, MAX_ASKED_GOODBYE_MS);
+      }, 5000),
+    );
+    if (this.hangUpWhenAttached) this.hangUp();
 
     const s = this.session;
-    const inbound = await query<{ direction: string }>(
-      "UPDATE conversations SET call_sid = COALESCE(call_sid, $2), call_status = 'in-progress' WHERE id = $1 RETURNING direction",
-      [s.conversationId, start.callSid],
-    );
-    // Outbound calls are recorded from answer via calls.create; inbound ones start here.
-    if (inbound[0]?.direction === "inbound") {
-      twilioClient
-        .calls(start.callSid)
-        .recordings.create({
-          recordingStatusCallback: `${config.publicBaseUrl}/twilio/voice/recording`,
-          recordingStatusCallbackEvent: ["completed"],
-        })
-        .catch((err) => console.error("Could not start call recording", err));
+    let maxCallMinutes = config.agent.maxCallMinutes;
+    try {
+      const inbound = await query<{ direction: string }>(
+        "UPDATE conversations SET call_sid = COALESCE(call_sid, $2), call_status = 'in-progress' WHERE id = $1 RETURNING direction",
+        [s.conversationId, start.callSid],
+      );
+      // Outbound calls are recorded from answer via calls.create; inbound ones start here.
+      if (inbound[0]?.direction === "inbound") {
+        twilioClient
+          .calls(start.callSid)
+          .recordings.create({
+            recordingStatusCallback: `${config.publicBaseUrl}/twilio/voice/recording`,
+            recordingStatusCallbackEvent: ["completed"],
+          })
+          .catch((err) => console.error("Could not start call recording", err));
+      }
+      await addMessage(s.conversationId, "assistant", s.greeting);
+      maxCallMinutes = (await getSettings()).maxCallMinutes;
+    } catch (err) {
+      this.fail("Call setup bookkeeping failed", err);
     }
-    await addMessage(s.conversationId, "assistant", s.greeting);
-
-    const { maxCallMinutes } = await getSettings();
     this.timers.push(
       setTimeout(() => {
         this.instruct("The call has reached its time limit. Tell the other person you have to go and say goodbye now, briefly.");
-        this.finishAfterSpeech(2000);
+        this.finishAfterSpeech(true, MAX_ASKED_GOODBYE_MS);
       }, maxCallMinutes * 60 * 1000),
-      setInterval(() => this.checkGoodbye(), 250),
-      setInterval(() => {
-        if (Date.now() - this.lastActivityAt < IDLE_HANGUP_MS || this.finishing) return;
-        this.instruct("Nobody has said anything for a while. Say a brief goodbye.");
-        this.finishAfterSpeech(2000);
-      }, 5000),
     );
     await this.ready;
     this.maybeKickoff();
@@ -246,7 +310,12 @@ class LiveCall {
     const msg = JSON.parse(raw) as TwilioStreamMessage;
     switch (msg.event) {
       case "media":
-        if (msg.media?.track === "outbound") return;
+        if (msg.media?.track === "outbound" || this.hangingUp) return;
+        if (this.lineSound.frame(Buffer.from(msg.media!.payload, "base64"))) {
+          this.lastLineSoundAt = Date.now();
+          // On calls placed for a task, hold music can go on for a while; the call's time limit still applies.
+          if (this.session.mode === "task") this.lastActivityAt = this.lastLineSoundAt;
+        }
         if (this.liveReady) this.live!.send({ type: "session.input_audio.append", audio: msg.media!.payload });
         else if (this.pendingAudio.length < MAX_PENDING_FRAMES) this.pendingAudio.push(msg.media!.payload);
         break;
@@ -333,20 +402,31 @@ class LiveCall {
       case "session.output_audio.delta":
         // Before the stream attaches, the greeting is still playing; drop anything early.
         if (!this.twilio) return;
-        this.lastOutputAt = this.lastActivityAt = Date.now();
-        this.goodbye.agentAudio(this.lastOutputAt);
+        // GPT-Live can stream silence between turns; only audible audio counts as the agent talking.
+        if (isAudibleMulaw(Buffer.from(event.delta, "base64"))) {
+          this.lastOutputAt = this.lastActivityAt = Date.now();
+          this.goodbye.agentAudio(this.lastOutputAt);
+        }
         this.sendTwilio({ event: "media", media: { payload: event.delta } });
         break;
       case "session.input_transcript.delta":
-        this.lastActivityAt = Date.now();
-        if (this.twilio) this.goodbye.callerSaid(event.delta, this.lastActivityAt);
+        if (hasWords(event.delta)) {
+          this.lastActivityAt = this.lastWordsAt = Date.now();
+          this.callerActivity++;
+        }
+        if (this.twilio) this.goodbye.callerSaid(event.delta, Date.now());
         if (!this.transcriptDone) this.grouper.push(event);
         break;
       case "session.output_transcript.delta":
+        if (event.delta.trim()) {
+          this.lastActivityAt = this.lastWordsAt = this.lastAgentWordsAt = Date.now();
+          this.agentActivity++;
+        }
         if (this.twilio) this.goodbye.agentSaid(event.delta, Date.now());
         if (!this.transcriptDone) this.grouper.push(event);
         break;
       case "session.delegation.created":
+        this.agentActivity++;
         this.queueDelegation(event.delegation.id);
         break;
       case "session.closed":
@@ -385,10 +465,76 @@ class LiveCall {
   }
 
   private checkGoodbye(): void {
-    if (this.finishing || !this.goodbye.isOver(Date.now())) return;
+    if (this.finishing || this.confirmingGoodbye) return;
+    // "Okay, I'll take care of it" while the backend works must never cancel the errand.
+    if (this.busyWithRequest()) return;
+    const now = Date.now();
+    if (!this.goodbye.pendingGoodbye) {
+      this.checkNotBefore = this.notOverCount = this.noAnswerCount = this.staleAnswers = 0;
+      this.checkedFarewellAt = -Infinity;
+      return;
+    }
+    if (!this.goodbye.isOver(now)) return;
+    // After a "not over", wait for more quiet or a new goodbye before asking again.
+    if (now < this.checkNotBefore && this.goodbye.lastFarewellAt <= this.checkedFarewellAt) return;
+    if (this.notOverCount >= MAX_NOT_OVER) return;
+    // Let the agent finish what it's saying first, so the check sees all of it (e.g. a question at the end).
+    const sinceAgentWords = now - this.lastAgentWordsAt;
+    if (sinceAgentWords < AGENT_DONE_MS) return;
+    if (now - this.lastOutputAt < SPEECH_SETTLE_MS && sinceAgentWords < AGENT_AUDIO_TRAIL_MS) return;
+
+    // The words alone can't tell a real ending from a transfer ("have a great day, transferring you
+    // now") or a goodbye followed by a question; the agent model reads the transcript and decides.
     const who = this.goodbye.endedBy === "agent" ? "Agent" : "The other side";
-    addMessage(this.session.conversationId, "event", `${who} said goodbye; call ended`).catch((err) => this.fail("Saving event failed", err));
-    this.finishAfterSpeech(0);
+    const agentAsked = this.agentActivity;
+    const callerAsked = this.callerActivity;
+    const farewellAt = this.goodbye.lastFarewellAt;
+    this.confirmingGoodbye = true;
+    const transcript = this.transcript
+      .slice(-20)
+      .map((l) => `${l.speaker}: ${l.text.length > 600 ? `…${l.text.slice(-600)}` : l.text}`)
+      .join("\n");
+    isCallOver(transcript, Math.round((now - this.lastWordsAt) / 1000), this.abort.signal)
+      .then((over) => {
+        this.confirmingGoodbye = false;
+        if (this.finishing || this.closed) return;
+        // The agent spoke or started on something while we were asking: the answer is about a
+        // conversation that has moved on. The next tick asks again if the call still looks over.
+        if (this.agentActivity !== agentAsked || this.busyWithRequest() || !this.goodbye.pendingGoodbye) return;
+        const later = Date.now();
+        // The other side said something meanwhile: ask again with it ("oh wait, one more thing"),
+        // unless they never stop (a TV or noise transcribed as words), then go with the answer.
+        if (this.callerActivity !== callerAsked && this.staleAnswers++ < 2) {
+          this.checkedFarewellAt = farewellAt;
+          this.checkNotBefore = later + 2000;
+          return;
+        }
+        this.staleAnswers = 0;
+        if (over === false) {
+          this.notOverCount++;
+          this.checkedFarewellAt = farewellAt;
+          this.checkNotBefore = later + Math.min(RECHECK_MAX_MS, RECHECK_MS * 2 ** (this.notOverCount - 1));
+          console.log(`Call ${this.callSid}: goodbye heard, but the conversation isn't over; staying on`);
+          addMessage(this.session.conversationId, "event", "Goodbye heard, but the conversation isn't over (e.g. a transfer or a question); staying on").catch((err) =>
+            this.fail("Saving event failed", err),
+          );
+          return;
+        }
+        if (over === null && this.noAnswerCount++ === 0) {
+          // No usable answer: try once more before deciding without one.
+          this.checkedFarewellAt = farewellAt;
+          this.checkNotBefore = later + 2000;
+          return;
+        }
+        const note = over === null ? " (couldn't double-check, hanging up anyway)" : "";
+        console.log(`Call ${this.callSid}: ${who.toLowerCase()} said goodbye; hanging up${note}`);
+        addMessage(this.session.conversationId, "event", `${who} said goodbye; hanging up${note}`).catch((err) => this.fail("Saving event failed", err));
+        this.finishAfterSpeech(false, MAX_AFTER_GOODBYE_MS);
+      })
+      .catch((err) => {
+        this.confirmingGoodbye = false;
+        this.fail("Goodbye check failed", err);
+      });
   }
 
   private saveSegment(segment: TranscriptSegment): void {
@@ -415,9 +561,23 @@ class LiveCall {
     }
   }
 
+  /** The agent backend is working on something for the caller (and hasn't been at it for too long). */
+  private busyWithRequest(): boolean {
+    return this.delegationsInFlight > 0 && Date.now() - this.delegationStartedAt < DELEGATION_HOLD_MAX_MS;
+  }
+
   private queueDelegation(delegationId: string): void {
+    if (this.delegationsInFlight++ === 0) this.delegationStartedAt = Date.now();
     // One at a time, so results land in the transcript in order.
-    this.delegations = this.delegations.then(() => this.runDelegation(delegationId)).catch((err) => this.fail("Delegation failed", err));
+    this.delegations = this.delegations
+      .then(() => this.runDelegation(delegationId))
+      .catch((err) => this.fail("Delegation failed", err))
+      .finally(() => {
+        this.delegationsInFlight--;
+        this.delegationStartedAt = this.lastActivityAt = Date.now();
+        // Give the agent time to relay the result before a pending goodbye ends the call.
+        this.goodbye.extend(Date.now());
+      });
   }
 
   private async runDelegation(delegationId: string): Promise<void> {
@@ -459,7 +619,7 @@ class LiveCall {
         });
       }
       await addMessage(s.conversationId, "event", "Agent ended the call");
-      this.finishAfterSpeech(0);
+      this.finishAfterSpeech(false, MAX_GOODBYE_MS);
       return;
     }
     this.transcript.push({ id: `delegation-${delegationId}`, speaker: "Backend result", text: result });
@@ -471,39 +631,74 @@ class LiveCall {
   // ---- Teardown -----------------------------------------------------------
 
   /**
-   * Hang up once the agent has finished talking: wait until GPT-Live has been
-   * quiet briefly, then send Twilio a mark, which comes back when everything
-   * queued before it has actually played to the caller.
+   * Hang up once the agent has finished talking: wait until its audible audio
+   * has stopped briefly, then send Twilio a mark, which comes back when
+   * everything queued before it has actually played to the caller.
+   * `expectGoodbye`: GPT-Live has just been asked to say goodbye, so wait for
+   * it to say one (it may be mid-sentence first), or for it to go quiet for
+   * SILENT_GOODBYE_MS without one. `maxMs`: hang up regardless after this long.
    */
-  private finishAfterSpeech(graceMs: number): void {
+  private finishAfterSpeech(expectGoodbye: boolean, maxMs: number): void {
     if (this.finishing) return;
     this.finishing = true;
     const startedAt = Date.now();
     const poll = setInterval(() => {
-      const elapsed = Date.now() - startedAt;
-      if (elapsed >= MAX_GOODBYE_MS) {
+      const now = Date.now();
+      const settled = now - this.lastOutputAt >= SPEECH_SETTLE_MS;
+      const ready = expectGoodbye
+        ? (this.goodbye.agentSaidGoodbyeSince(startedAt) && settled) || now - Math.max(startedAt, this.lastOutputAt) >= SILENT_GOODBYE_MS
+        : settled;
+      if (now - startedAt >= maxMs) {
         clearInterval(poll);
         this.hangUp();
-      } else if (elapsed >= graceMs && Date.now() - this.lastOutputAt >= SPEECH_SETTLE_MS) {
+      } else if (ready) {
         clearInterval(poll);
         this.sendTwilio({ event: "mark", mark: { name: "hangup" } });
         // If the mark never comes back, still hang up.
-        this.timers.push(setTimeout(() => this.hangUp(), 8000));
+        this.timers.push(setTimeout(() => this.hangUp(), MARK_TIMEOUT_MS));
       }
     }, 100);
     this.timers.push(poll);
   }
 
+  /**
+   * End the call: through Twilio's REST API, and if that fails or is slow, by
+   * closing the media stream, which ends <Connect> so Twilio fetches its action
+   * URL (/twilio/voice/relay-ended answers <Hangup/>).
+   */
   private hangUp(): void {
     if (this.hangingUp) return;
-    this.hangingUp = true;
-    if (this.liveReady) this.live!.send({ type: "session.close" });
-    if (this.callSid) {
-      twilioClient
-        .calls(this.callSid)
-        .update({ status: "completed" })
-        .catch((err) => this.fail("Hangup failed", err));
+    const ws = this.twilio;
+    if (!ws) {
+      // Too early to hang up the call; do it once its audio stream arrives.
+      this.hangUpWhenAttached = true;
+      return;
     }
+    this.hangingUp = true;
+    console.log(`Call ${this.callSid}: hanging up`);
+    if (this.liveReady) this.live!.send({ type: "session.close" });
+    const endStream = () => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      ws.close(1000, "call ended");
+      setTimeout(() => {
+        if (ws.readyState !== WebSocket.CLOSED) ws.terminate();
+      }, 3000).unref();
+    };
+    const fallback = setTimeout(endStream, REST_HANGUP_GRACE_MS);
+    fallback.unref();
+    if (!this.callSid) return void endStream();
+    twilioClient
+      .calls(this.callSid)
+      .update({ status: "completed" })
+      .catch((err) => {
+        clearTimeout(fallback);
+        if (ws.readyState !== WebSocket.OPEN) return; // the call ended anyway
+        this.fail("Hangup failed", err);
+        addMessage(this.session.conversationId, "event", `Twilio hang-up request failed (${(err as Error).message}); ending the call's audio stream instead`).catch(
+          () => undefined,
+        );
+        endStream();
+      });
   }
 
   private shutdown(): void {
