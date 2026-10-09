@@ -25,6 +25,7 @@ const AFTER_FAREWELL = new Set([
 ]);
 const BEFORE_PLAIN_FAREWELL = /(?:^|[.!,…;:]|\b(?:okay|ok|alright|all right|thanks|thank you|you too|and|well|so|great|perfect|bye))$/i;
 // Passing a message on is not saying goodbye: "I'll tell her good night", "she said she'll talk to you later".
+// (Anything subtler is left to the check in callover.ts.)
 const REPORTED = /\b(?:tell|tells|told|telling|say|says|said|saying|asked|asks|text|texting|wish|wishes|wishing|message|remind|reminded)\b/i;
 // Someone else's plans or advice ("they'll talk to you later", "you should have a great weekend",
 // "tell her to have a great day"): only "I/we will …" is the agent taking its leave.
@@ -32,7 +33,9 @@ const MODAL_BEFORE = /\b([\p{L}'’]+?)(?:['’]ll|\s+(will|would|should|could|c
 
 function farewellContextOk(before: string): boolean {
   const sentence = before.split(/[.!?…]/).pop() ?? "";
-  if (REPORTED.test(sentence)) return false;
+  // "Okay, I'll tell him, thanks, goodbye" is a goodbye; "she said she'll talk to you later" isn't.
+  const clause = sentence.split(/[,;:]/).pop() ?? "";
+  if (REPORTED.test(clause)) return false;
   const modal = MODAL_BEFORE.exec(sentence);
   if (!modal) return true;
   return ["i", "we"].includes(modal[1].toLowerCase()) && ["will", "can", undefined].includes(modal[2]?.toLowerCase());
@@ -84,20 +87,6 @@ export function hasWords(text: string): boolean {
   return /[\p{L}\p{N}]/u.test(text);
 }
 
-/**
- * The other side is handing the call on or putting it on hold ("I'll transfer you
- * now, have a great day!"): goodbyes from either side don't end the call until
- * someone picks up again.
- */
-const HANDOFF = new RegExp(
-  String.raw`\b(?:transfer(?:ring)? (?:you|your call)|put(?:ting)? you (?:through|on hold)|connect(?:ing)? (?:you|your call)|` +
-    String.raw`(?:get|send|pass|forward|route|switch)(?:ing)? you (?:over )?to|hold on|hang on|hold the line|stay on the line|please hold|` +
-    String.raw`one moment|one sec(?:ond)?|just a (?:moment|sec(?:ond)?|minute)|give me a (?:sec(?:ond)?|minute|moment)|bear with me)\b`,
-  "i",
-);
-/** A hand-off stops counting after this long, or once someone says something new. */
-export const HANDOFF_MAX_MS = 120_000;
-
 /** The last few words, to judge what someone just said rather than everything since they started. */
 function lastWords(text: string, n: number): string {
   return (text.match(/[\p{L}\p{N}'’-]+/gu) ?? []).slice(-n).join(" ");
@@ -131,7 +120,8 @@ export const CALLER_PAUSE_MS = 5_000;
 export const GOODBYE_BACKSTOP_MS = 90_000;
 
 /**
- * Decides when a call is over, from the raw transcript as it streams in. The
+ * Spots when a call looks over, from the raw transcript as it streams in;
+ * LiveCall then confirms with the agent model (callover.ts) before hanging up. The
  * agent decides whether the conversation goes on: anything substantive it
  * says cancels a pending hang-up. What the other side says only delays it,
  * and only up to a limit, so an unrecognized "thanks, have a good one" or
@@ -155,19 +145,8 @@ export class GoodbyeWatcher {
   private answerOwed = false;
   /** When the agent last said a farewell. */
   private agentFarewellAt = -Infinity;
-  /** When the other side last handed the call on, and in which of their turns. */
-  private handoffAt: number | null = null;
-  private handoffTurn = 0;
-  private callerTurns = 0;
   /** The agent is relaying a result after its goodbye; that doesn't take the goodbye back. */
   private relaying = false;
-
-  /**
-   * `handoffs`: watch for the other side transferring the call or putting it
-   * on hold (calls to businesses). On a user's own call, "hold on, let me find
-   * the number" is just a pause.
-   */
-  constructor(private options: { handoffs?: boolean } = {}) {}
   /** When the goodbye became pending; pushed back when the other side adds something. */
   private byeAt: number | null = null;
   /** When the goodbye first became pending; never pushed back. */
@@ -184,7 +163,7 @@ export class GoodbyeWatcher {
     // Whitespace joins words but isn't speech.
     if (!delta.trim()) return;
     this.lastSpeechAt = now;
-    const farewell = !this.handoffActive(now) && (endsWithFarewell(this.agentText) || startsWithFarewell(this.agentTurn));
+    const farewell = endsWithFarewell(this.agentText) || startsWithFarewell(this.agentTurn);
     if (farewell) {
       this.agentBye = true;
       this.answerOwed = false;
@@ -206,7 +185,6 @@ export class GoodbyeWatcher {
     if (this.lastSpeaker !== "caller" && hasWords(delta)) {
       this.callerTurn = "";
       this.lastSpeaker = "caller";
-      this.callerTurns++;
       this.relaying = false;
       // The agent had finished a sentence: a farewell has to be in what it says next.
       if (/[.!?…]["”’']?\s*$/.test(this.agentText)) this.agentText = "";
@@ -221,14 +199,7 @@ export class GoodbyeWatcher {
       return;
     }
     this.lastSpeechAt = now;
-    const recent = lastWords(this.callerTurn, 12);
-    if (this.options.handoffs !== false && HANDOFF.test(recent)) {
-      this.handoffAt = now;
-      this.handoffTurn = this.callerTurns;
-    } else if (this.handoffAt !== null && this.callerTurns > this.handoffTurn && !isClosingReply(lastWords(this.callerTurn, 4))) {
-      this.handoffAt = null; // someone picked up again
-    }
-    const farewell = endsWithFarewell(this.callerTurn) && !this.handoffActive(now);
+    const farewell = endsWithFarewell(this.callerTurn);
     // Something substantive ("wait, can you also tell her good night"): a later farewell
     // from the agent must come after it, and a pending goodbye waits for the agent's answer.
     // Judged on the latest words, so a string of "Okay." from a noisy line stays a closing.
@@ -274,8 +245,15 @@ export class GoodbyeWatcher {
     return this.agentBye && this.agentFarewellAt >= since;
   }
 
-  private handoffActive(now: number): boolean {
-    return this.handoffAt !== null && now - this.handoffAt < HANDOFF_MAX_MS;
+  /** Whether a goodbye (from either side) is waiting to end the call. */
+  get pendingGoodbye(): boolean {
+    return this.byeAt !== null && (this.agentBye || this.callerBye);
+  }
+
+  /** The call isn't over after all (see callover.ts): forget the goodbye; a new one is needed. */
+  reset(): void {
+    this.agentBye = this.callerBye = this.answerOwed = this.relaying = false;
+    this.byeAt = this.firstByeAt = null;
   }
 
   /** True once a goodbye has been said and the line has gone quiet, or a time limit has passed. */

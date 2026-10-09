@@ -21,6 +21,7 @@ import { addMessage, getTask, getUser, query, type User } from "../db/index.js";
 import { twilioClient } from "../twilio.js";
 import { dtmfAudio } from "./dtmf.js";
 import { takeRelaySession, type RelaySession } from "./sessions.js";
+import { isCallOver } from "./callover.js";
 import { GoodbyeWatcher, hasWords, isAudibleMulaw, LineSound } from "./goodbye.js";
 import { finalizeCall } from "./summary.js";
 import { getSettings } from "../settings.js";
@@ -51,6 +52,8 @@ const SILENT_GOODBYE_MS = 8_000;
 const MAX_ASKED_GOODBYE_MS = 20_000;
 /** After the goodbye watcher fires, the agent is done; don't wait long for audible noise to stop. */
 const MAX_AFTER_GOODBYE_MS = 8_000;
+/** Before asking whether the call is over, wait up to this long for the agent to stop talking. */
+const CHECK_WAITS_FOR_SPEECH_MS = 20_000;
 /** A goodbye never ends the call while the agent is doing something for the caller, unless that takes longer than this. */
 const DELEGATION_HOLD_MAX_MS = 60_000;
 /** If the mark never comes back, hang up anyway after this long. */
@@ -163,9 +166,13 @@ class LiveCall {
   /** Tasks the agent backend is working on for the call, and when the current one started. */
   private delegationsInFlight = 0;
   private delegationStartedAt = 0;
+  /** Asking the agent model whether the call is really over. */
+  private confirmingGoodbye = false;
+  /** When the goodbye watcher first said the call looked over (0 = it doesn't). */
+  private looksOverSince = 0;
 
   constructor(private session: RelaySession) {
-    this.goodbye = new GoodbyeWatcher({ handoffs: session.mode === "task" });
+    this.goodbye = new GoodbyeWatcher();
     this.grouper.on("segment.updated", (s) => this.upsertSegment(s));
     this.grouper.on("segment.closed", ({ segment }) => this.saveSegment(segment));
     // The greeting is played by Twilio's <Say> before the audio stream starts.
@@ -431,14 +438,49 @@ class LiveCall {
   }
 
   private checkGoodbye(): void {
-    if (this.finishing) return;
+    if (this.finishing || this.confirmingGoodbye) return;
     // "Okay, I'll take care of it" while the backend works must never cancel the errand.
     if (this.busyWithRequest()) return;
-    if (!this.goodbye.isOver(Date.now())) return;
+    const now = Date.now();
+    if (!this.goodbye.isOver(now)) {
+      this.looksOverSince = 0;
+      return;
+    }
+    this.looksOverSince ||= now;
+    // Let the agent finish what it's saying first, so the check sees all of it (e.g. a question at the end).
+    if (now - this.lastOutputAt < SPEECH_SETTLE_MS && now - this.looksOverSince < CHECK_WAITS_FOR_SPEECH_MS) return;
     const who = this.goodbye.endedBy === "agent" ? "Agent" : "The other side";
-    console.log(`Call ${this.callSid}: ${who.toLowerCase()} said goodbye; hanging up`);
-    addMessage(this.session.conversationId, "event", `${who} said goodbye; hanging up`).catch((err) => this.fail("Saving event failed", err));
-    this.finishAfterSpeech(false, MAX_AFTER_GOODBYE_MS);
+    // The words alone can't tell a real ending from a transfer ("have a great day, transferring you
+    // now") or a goodbye followed by a question; the agent model reads the transcript and decides.
+    this.confirmingGoodbye = true;
+    const transcript = this.transcript
+      .slice(-20)
+      .map((l) => `${l.speaker}: ${l.text.slice(0, 400)}`)
+      .join("\n");
+    isCallOver(transcript, this.abort.signal)
+      .then((over) => {
+        this.confirmingGoodbye = false;
+        if (this.finishing || this.closed) return;
+        if (over === false) {
+          console.log(`Call ${this.callSid}: goodbye heard, but the conversation isn't over; staying on`);
+          addMessage(this.session.conversationId, "event", "Goodbye heard, but the conversation isn't over (e.g. a transfer or a question); staying on").catch((err) =>
+            this.fail("Saving event failed", err),
+          );
+          this.goodbye.reset();
+          this.looksOverSince = 0;
+          return;
+        }
+        // Someone carried on while we were checking.
+        if (!this.goodbye.pendingGoodbye) return;
+        const note = over === null ? " (couldn't double-check, hanging up anyway)" : "";
+        console.log(`Call ${this.callSid}: ${who.toLowerCase()} said goodbye; hanging up${note}`);
+        addMessage(this.session.conversationId, "event", `${who} said goodbye; hanging up${note}`).catch((err) => this.fail("Saving event failed", err));
+        this.finishAfterSpeech(false, MAX_AFTER_GOODBYE_MS);
+      })
+      .catch((err) => {
+        this.confirmingGoodbye = false;
+        this.fail("Goodbye check failed", err);
+      });
   }
 
   private saveSegment(segment: TranscriptSegment): void {

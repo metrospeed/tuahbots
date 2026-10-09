@@ -388,13 +388,6 @@ test("goodbye detection: promises and passed-on messages aren't goodbyes", () =>
   }
 });
 
-test("goodbye watcher: the other side handing the call on isn't a goodbye", () => {
-  const w = new GoodbyeWatcher();
-  w.callerSaid("Okay, I'm going to transfer you to billing now. Have a great day!", 0);
-  w.agentSaid("Thank you so much!", 1000);
-  assert.equal(w.isOver(60_000), false);
-});
-
 test("goodbye watcher: a noisy line repeating closings doesn't stretch the wait", () => {
   const w = new GoodbyeWatcher();
   w.agentSaid("All set. Goodbye!", 0);
@@ -419,38 +412,6 @@ test("goodbye watcher: extend() restarts the timers for a result the agent still
   q.extend(10_000);
   q.agentSaid("They're full on Friday. Should I try Saturday?", 11_000);
   assert.equal(q.isOver(60_000), false);
-});
-
-test("goodbye watcher: a transfer or hold isn't the end of the call, from either side", () => {
-  const sim = (lines: Array<[speaker: "agent" | "caller", text: string]>) => {
-    const w = new GoodbyeWatcher();
-    let t = 0;
-    for (const [speaker, text] of lines) {
-      t += 1500;
-      if (speaker === "agent") w.agentSaid(text, t);
-      else w.callerSaid(text, t);
-    }
-    return { w, t };
-  };
-  // The agent mirrors the receptionist's farewell; ringback follows.
-  let { w, t } = sim([["caller", "Okay, I'm going to transfer you to billing now. Have a great day!"], ["agent", "Thank you! You have a great day too."]]);
-  assert.equal(w.isOver(t + 60_000), false);
-  // The hand-off and the farewell in separate turns.
-  ({ w, t } = sim([["caller", "Sure, let me transfer you to billing."], ["agent", "Great, thank you!"], ["caller", "Mhm, have a great day!"], ["agent", "You too!"]]));
-  assert.equal(w.isOver(t + 60_000), false);
-  ({ w, t } = sim([["caller", "Let me get you over to the pharmacy, hang on. Have a good one."], ["agent", "Thank you!"]]));
-  assert.equal(w.isOver(t + 60_000), false);
-  // Once someone new picks up, goodbyes count again.
-  ({ w, t } = sim([["caller", "Please hold."], ["agent", "Sure."], ["caller", "Billing, this is Sara, how can I help?"], ["agent", "Hi Sara, I'm calling about invoice 42."], ["caller", "That's sorted now. Have a great day!"], ["agent", "Thanks, you too, goodbye!"]]));
-  assert.equal(w.isOver(t + GOODBYE_QUIET_MS), true);
-  // On a user's own call, "hold on" is just a pause.
-  const own = new GoodbyeWatcher({ handoffs: false });
-  own.callerSaid("Hold on, actually never mind. Thanks, bye!", 0);
-  own.agentSaid("Bye!", 1000);
-  assert.equal(own.isOver(1000 + GOODBYE_QUIET_MS), true);
-  // A hold earlier in the turn, then a goodbye, still counts.
-  ({ w, t } = sim([["caller", "One moment please. Okay, you're booked for Friday at three, have a great day!"], ["agent", "Thank you, goodbye!"]]));
-  assert.equal(w.isOver(t + GOODBYE_QUIET_MS), true);
 });
 
 test("goodbye watcher: a reply that opens with a goodbye counts as one", () => {
@@ -478,6 +439,26 @@ test("goodbye detection: someone else's plans or advice aren't the agent's goodb
     assert.ok(!endsWithFarewell(said), said);
   }
   for (const said of ["We'll talk soon, bye!", "I'll talk to you later!", "She'll talk to you later. Bye!", "Have a great day, Mrs. O'Brien!", "Thank you for calling, goodbye."]) {
+    assert.ok(endsWithFarewell(said), said);
+  }
+});
+
+test("goodbye watcher: reset() forgets a goodbye the call-over check rejected", () => {
+  const w = new GoodbyeWatcher();
+  w.callerSaid("Okay, I'm going to transfer you to billing now. Have a great day!", 0);
+  w.agentSaid("Thank you! You have a great day too.", 1000);
+  assert.equal(w.pendingGoodbye, true);
+  assert.equal(w.isOver(1000 + GOODBYE_QUIET_MS), true, "looks over from the words alone");
+  w.reset();
+  assert.equal(w.pendingGoodbye, false);
+  assert.equal(w.isOver(120_000), false, "a new goodbye is needed");
+  w.callerSaid("Billing here, all sorted. Bye now.", 130_000);
+  w.agentSaid("Thanks, goodbye!", 131_000);
+  assert.equal(w.isOver(131_000 + GOODBYE_QUIET_MS), true);
+});
+
+test("goodbye detection: passing a message on, then saying goodbye, is a goodbye", () => {
+  for (const said of ["Okay, I'll tell him, thank you, goodbye.", "Perfect, I'll tell Mark, thanks so much for your help, goodbye!", "Okay, I'll remind him, thanks, bye!"]) {
     assert.ok(endsWithFarewell(said), said);
   }
 });
