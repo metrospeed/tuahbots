@@ -581,3 +581,35 @@ test("OpenRouter: fixed endpoint, Chat Completions, no-data-collection routing; 
   assert.equal(custom.client.apiKey, "no-key");
   assert.throws(() => provider.agentEndpoint({ ...provider.DEFAULT_AI_SETTINGS, provider: "custom", baseUrl: "" }), /No endpoint URL/);
 });
+
+const sms = await import("../src/sms.js");
+
+test("httpSMS webhook tokens: HS256 with the signing key, unexpired", () => {
+  const now = Date.now();
+  const s = Math.floor(now / 1000);
+  const claims = { iss: "api.httpsms.com", iat: s, nbf: s - 600, exp: s + 600 };
+  const good = sms.signWebhookToken(claims, "key-1");
+  assert.ok(sms.verifyWebhookAuth(`Bearer ${good}`, "key-1", now));
+  assert.ok(!sms.verifyWebhookAuth(`Bearer ${good}`, "key-2", now), "wrong key");
+  assert.ok(!sms.verifyWebhookAuth(good, "key-1", now), "no Bearer prefix");
+  assert.ok(!sms.verifyWebhookAuth(undefined, "key-1", now));
+  assert.ok(!sms.verifyWebhookAuth(`Bearer ${good}`, "", now), "no key configured");
+  assert.ok(!sms.verifyWebhookAuth(`Bearer ${good}`, "key-1", now + 11 * 60_000), "expired");
+  assert.ok(!sms.verifyWebhookAuth(`Bearer ${sms.signWebhookToken({ ...claims, nbf: s + 3600 }, "key-1")}`, "key-1", now), "not yet valid");
+  assert.ok(!sms.verifyWebhookAuth(`Bearer ${sms.signWebhookToken({ iat: s }, "key-1")}`, "key-1", now), "no expiry");
+  // alg "none" and a tampered body are refused.
+  const [, body] = good.split(".");
+  const none = `${Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url")}.${body}.`;
+  assert.ok(!sms.verifyWebhookAuth(`Bearer ${none}`, "key-1", now));
+  const tampered = good.replace(body, Buffer.from(JSON.stringify({ ...claims, exp: s + 99999 })).toString("base64url"));
+  assert.ok(!sms.verifyWebhookAuth(`Bearer ${tampered}`, "key-1", now));
+});
+
+test("text footers must disclose the AI and how to opt out", () => {
+  assert.equal(validateSettings({ ...DEFAULT_SETTINGS, textFooter: "- {agent}, AI assistant for {requester}. Text STOP to opt out." }), null);
+  assert.match(validateSettings({ ...DEFAULT_SETTINGS, textFooter: "- {agent} for {requester}. Reply STOP to opt out." })!, /AI assistant/);
+  assert.match(validateSettings({ ...DEFAULT_SETTINGS, textFooter: "- {agent}, an AI assistant for {requester}." })!, /STOP/);
+  assert.match(validateSettings({ ...DEFAULT_SETTINGS, textFooter: " " })!, /empty/);
+  assert.equal(sms.messageIdFromRequestId("tuah-msg-42"), 42);
+  assert.equal(sms.messageIdFromRequestId("other-42"), null);
+});

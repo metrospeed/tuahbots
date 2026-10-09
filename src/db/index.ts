@@ -79,6 +79,10 @@ export interface Message {
   role: MessageRole;
   body: string;
   twilio_sid: string | null;
+  /** "sms" when this line was a text message. */
+  via: string | null;
+  /** httpSMS message id, for texts. */
+  sms_id: string | null;
   created_at: Date;
 }
 
@@ -122,10 +126,16 @@ export async function createConversation(c: {
   return row!;
 }
 
-export async function addMessage(conversationId: number, role: MessageRole, body: string, twilioSid?: string): Promise<Message> {
+export async function addMessage(
+  conversationId: number,
+  role: MessageRole,
+  body: string,
+  twilioSid?: string,
+  text?: { smsId?: string | null },
+): Promise<Message> {
   const row = await queryOne<Message>(
-    "INSERT INTO messages (conversation_id, role, body, twilio_sid) VALUES ($1, $2, $3, $4) RETURNING *",
-    [conversationId, role, body, twilioSid ?? null],
+    "INSERT INTO messages (conversation_id, role, body, twilio_sid, via, sms_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+    [conversationId, role, body, twilioSid ?? null, text ? "sms" : null, text?.smsId ?? null],
   );
   await pool.query("UPDATE conversations SET last_activity_at = now() WHERE id = $1", [conversationId]);
   return row!;

@@ -65,7 +65,7 @@
         bubble.append(el("br"), a);
       }
     }
-    bubble.append(el("span", "time", m.time));
+    bubble.append(el("span", "time", m.time + (m.via === "sms" ? " · text" : "")));
     row.append(bubble);
     log.append(row);
   }
@@ -81,7 +81,7 @@
     for (const t of tasks) {
       const a = el("a", "task"); a.href = "/app/tasks/" + t.id;
       const top = el("div", "top"); top.append(el("span", null, t.who), el("span", "pill " + t.status, t.status.replace("_", " ")));
-      const body = el("div", "body"); body.append(top, el("div", "obj", t.objective), el("div", "when", t.time));
+      const body = el("div", "body"); body.append(top, el("div", "obj", t.objective), el("div", "when", (t.kind === "sms" ? "Texts · " : "") + t.time));
       a.append(avatar(t.who), body);
       list.append(a);
     }
@@ -99,7 +99,7 @@
     for (const n of numbers) {
       const row = el("div", "num");
       const who = el("div", "who");
-      who.append(el("div", "nm", n.name || n.phone), el("div", "ph", (n.name ? n.phone + " · " : "") + "last called " + n.lastCalled));
+      who.append(el("div", "nm", n.name || n.phone), el("div", "ph", (n.name ? n.phone + " · " : "") + "last contacted " + n.lastCalled));
       const label = el("label", "switch");
       const box = el("input");
       box.type = "checkbox"; box.setAttribute("role", "switch"); box.checked = n.callbackAllowed;

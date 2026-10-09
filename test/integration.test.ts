@@ -18,7 +18,7 @@ const openAIRequests: any[] = [];
  * Tests can make the agent model slow, answer a call's delegation with text
  * instead of end_call, or change its answer to "is this call over?".
  */
-const fakeAgent = { delayMs: 0, reply: null as string | null, callOver: "OVER", callOverDelayMs: 0 };
+const fakeAgent = { delayMs: 0, reply: null as string | null, callOver: "OVER", callOverDelayMs: 0, textReply: "Thanks, that's all I needed!" };
 const fakeOpenAI = http.createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
@@ -41,6 +41,12 @@ const fakeOpenAI = http.createServer((req, res) => {
     const answered = Array.isArray(request.input) && request.input.some((i: any) => i.type === "function_call_output");
     const unknown = unknownInputField(request);
     if (unknown) return rejectUnknown(res, unknown);
+    // The agent texting with someone: it reports the outcome, then texts a thank-you.
+    if (tools.includes("complete_task")) {
+      return sendResponseStream(res, request.model, answered
+        ? [textMessage(fakeAgent.textReply)]
+        : [functionCall("complete_task", { result: "They can start on the 18th; the quote is $1,200." })]);
+    }
     if (!tools.includes("end_call")) return void res.writeHead(400).end(JSON.stringify({ error: { message: "test" } }));
     if (fakeAgent.reply !== null) return sendResponseStream(res, request.model, [textMessage(fakeAgent.reply)]);
     sendResponseStream(res, request.model, answered ? [textMessage("Ending the call.")] : [functionCall("end_call", { reason: "done" })]);
@@ -71,6 +77,31 @@ const fakeTwilio = http.createServer((req, res) => {
   res.writeHead(404).end();
 });
 await new Promise<void>((resolve) => fakeTwilio.listen(0, resolve));
+
+// A stand-in for the httpSMS API: texts the app asked the phone to send.
+const httpsmsSent: Array<{ apiKey: string; from: string; to: string; content: string; request_id: string; id: string }> = [];
+let httpsmsFailNext = false;
+const fakeHttpsms = http.createServer((req, res) => {
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    if (req.method !== "POST" || req.url !== "/v1/messages/send") return void res.writeHead(404).end();
+    if (httpsmsFailNext) {
+      httpsmsFailNext = false;
+      res.writeHead(402, { "Content-Type": "application/json" });
+      return void res.end(JSON.stringify({ status: "error", message: "You have exceeded your monthly limit" }));
+    }
+    const id = `0b6e1c8e-0000-4000-8000-${String(httpsmsSent.length + 1).padStart(12, "0")}`;
+    httpsmsSent.push({ apiKey: String(req.headers["x-api-key"] ?? ""), ...JSON.parse(body), id });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "success", message: "message added to queue", data: { id, status: "pending" } }));
+  });
+});
+await new Promise<void>((resolve) => fakeHttpsms.listen(0, resolve));
+process.env.HTTPSMS_API_BASE_URL = `http://127.0.0.1:${(fakeHttpsms.address() as AddressInfo).port}`;
+process.env.HTTPSMS_API_KEY = "httpsms-test-key";
+process.env.HTTPSMS_PHONE_NUMBER = "+14155550100";
+process.env.HTTPSMS_WEBHOOK_SIGNING_KEY = "httpsms-signing-key";
 process.env.TWILIO_API_BASE_URL = `http://127.0.0.1:${(fakeTwilio.address() as AddressInfo).port}`;
 await new Promise<void>((resolve) => fakeOpenAI.listen(0, resolve));
 process.env.OPENAI_BASE_URL = `http://127.0.0.1:${(fakeOpenAI.address() as AddressInfo).port}/v1`;
@@ -107,6 +138,7 @@ after(async () => {
   fakeOpenAI.closeAllConnections();
   fakeOpenAI.close();
   fakeTwilio.close();
+  fakeHttpsms.close();
   if (!enabled) return;
   server.close();
   await db.pool.end();
@@ -1416,4 +1448,198 @@ test("admin AI settings: custom endpoint over Chat Completions, keys encrypted, 
     await db.pool.query("DELETE FROM settings WHERE key LIKE 'ai.%'");
     await loadAiSettings();
   }
+});
+
+// ---- Texting through httpSMS --------------------------------------------------
+
+/** POST an httpSMS webhook event, signed the way httpSMS signs them. */
+async function httpsmsEvent(type: string, data: Record<string, unknown>, key = "httpsms-signing-key"): Promise<Response> {
+  const { signWebhookToken } = await import("../src/sms.js");
+  const now = Math.floor(Date.now() / 1000);
+  const token = signWebhookToken({ iss: "api.httpsms.com", aud: ["https://agent.test/httpsms/webhook"], iat: now, nbf: now - 600, exp: now + 600 }, key);
+  return fetch(`${base}/httpsms/webhook`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Event-Type": type, Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ specversion: "1.0", id: `evt-${Math.random()}`, source: "/v1/messages/receive", type, datacontenttype: "application/json", time: new Date().toISOString(), data }),
+  });
+}
+let smsCounter = 0;
+const received = (contact: string, content: string) =>
+  httpsmsEvent("message.phone.received", {
+    message_id: `in-${++smsCounter}`,
+    user_id: "u1",
+    owner: "+14155550100",
+    contact,
+    content,
+    encrypted: false,
+    sim: "SIM1",
+    timestamp: new Date().toISOString(),
+  });
+async function until<T>(check: () => Promise<T | undefined | false>, what: string, ms = 5000): Promise<T> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const value = await check();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+async function textingUser(name: string, phone: string | null = null) {
+  // Texts are only started during contact hours; make that any time, so tests don't depend on the clock.
+  const { saveSettings } = await import("../src/settings.js");
+  await saveSettings({ contactHoursStart: 0, contactHoursEnd: 24 });
+  return (await db.query("INSERT INTO users (name, phone) VALUES ($1, $2) RETURNING *", [name, phone]))[0];
+}
+const chatLines = async (userId: number) =>
+  db.query<{ role: string; body: string; via: string | null }>(
+    "SELECT m.role, m.body, m.via FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.kind = 'user_web' AND c.user_id = $1 ORDER BY m.id",
+    [userId],
+  );
+
+test("httpSMS webhooks need a valid signature", { skip: !enabled }, async () => {
+  const unsigned = await fetch(`${base}/httpsms/webhook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  assert.equal(unsigned.status, 401);
+  assert.equal((await httpsmsEvent("message.phone.received", { contact: "+14155550901", owner: "+14155550100", content: "hi" }, "wrong-key")).status, 401);
+  // Texts from unknown numbers are logged for the admin without a reply.
+  const before = httpsmsSent.length;
+  assert.equal((await received("+14155550901", "who is this?")).status, 204);
+  const row = await until(
+    async () => (await db.query("SELECT m.body, m.via FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.kind = 'unknown_sms' AND c.counterpart_phone = '+14155550901'"))[0],
+    "the unknown text",
+  );
+  assert.deepEqual(row, { body: "who is this?", via: "sms" });
+  assert.equal(httpsmsSent.length, before);
+});
+
+test("texting someone: first text with the footer, their reply answered by the text agent, outcome in the chat", { skip: !enabled }, async () => {
+  const { startTextTask } = await import("../src/tasks.js");
+  const user = await textingUser("Tess Texter");
+  const to = "+14155550911";
+  const task = await startTextTask(user, {
+    phone: "(415) 555-0911",
+    recipientName: "Acme Roofing",
+    message: "Hi Mike, I'm writing for Tess about quote #881. Could you start before the 20th?",
+    objective: "Find out if they can start before the 20th.",
+    context: "Quote #881 for $1,200.",
+  });
+  assert.equal(task.kind, "sms");
+  const first = httpsmsSent.at(-1)!;
+  assert.equal(first.apiKey, "httpsms-test-key");
+  assert.equal(first.from, "+14155550100");
+  assert.equal(first.to, to);
+  assert.equal(first.content, "Hi Mike, I'm writing for Tess about quote #881. Could you start before the 20th?\n\n- Tuah, an AI assistant texting for Tess Texter. Reply STOP to opt out.");
+  assert.match(first.request_id, /^tuah-msg-\d+$/);
+
+  // Their reply: the text agent completes the task and texts a thank-you.
+  const sent = httpsmsSent.length;
+  await received(to, "Yes, we can start on the 18th.");
+  await until(async () => httpsmsSent.length > sent, "the agent's reply");
+  assert.deepEqual([httpsmsSent.at(-1)!.to, httpsmsSent.at(-1)!.content], [to, "Thanks, that's all I needed!"]);
+  const done = (await db.query("SELECT status, result FROM tasks WHERE id = $1", [task.id]))[0];
+  assert.deepEqual(done, { status: "completed", result: "They can start on the 18th; the quote is $1,200." });
+  const chat = await chatLines(user.id);
+  assert.match(chat.at(-1)!.body, /^Texts with Acme Roofing \(task #\d+\) done:\nThey can start on the 18th/);
+  assert.equal(chat.at(-1)!.via, null);
+
+  // The agent saw its own first text, and the thread is stored as texts.
+  const textAgentRequest = openAIRequests.filter((r) => (r.tools ?? []).some((t: any) => t.name === "complete_task"))[0];
+  assert.match(JSON.stringify(textAgentRequest.input), /quote #881. Could you start before the 20th/);
+  const thread = await db.query(
+    "SELECT m.role, m.via FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.task_id = $1 AND m.role <> 'event' ORDER BY m.id",
+    [task.id],
+  );
+  assert.deepEqual(thread, [{ role: "assistant", via: "sms" }, { role: "counterpart", via: "sms" }, { role: "assistant", via: "sms" }]);
+
+  // A repeated webhook for the same text is ignored.
+  const count = (await db.query("SELECT count(*)::int AS n FROM messages WHERE via = 'sms'"))[0].n;
+  await httpsmsEvent("message.phone.received", { message_id: `in-${smsCounter}`, owner: "+14155550100", contact: to, content: "Yes, we can start on the 18th." });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal((await db.query("SELECT count(*)::int AS n FROM messages WHERE via = 'sms'"))[0].n, count);
+
+  // STOP blocks the number, confirms once, and no more texts or calls go to it.
+  const beforeStop = httpsmsSent.length;
+  await received(to, "STOP");
+  await until(async () => (await db.query("SELECT 1 FROM blocked_numbers WHERE phone = $1", [to]))[0], "the opt-out");
+  await until(async () => httpsmsSent.length > beforeStop, "the opt-out confirmation");
+  assert.equal(httpsmsSent.at(-1)!.content, "You won't get any more texts from this number.");
+  await assert.rejects(startTextTask(user, { phone: to, recipientName: "", message: "Hi again", objective: "x", context: "" }), /opted out or been blocked/);
+  // START lifts it.
+  await received(to, "start");
+  await until(async () => !(await db.query("SELECT 1 FROM blocked_numbers WHERE phone = $1", [to]))[0], "the opt-in");
+});
+
+test("texts that httpSMS can't queue or deliver fail the task and are reported", { skip: !enabled }, async () => {
+  const { startTextTask } = await import("../src/tasks.js");
+  const user = await textingUser("Fay Failing");
+  httpsmsFailNext = true;
+  await assert.rejects(
+    startTextTask(user, { phone: "+14155550921", recipientName: "Bakery", message: "Hi, is the cake ready?", objective: "Check the cake", context: "" }),
+    /The text could not be sent: httpSMS refused the text \(HTTP 402: You have exceeded your monthly limit\)/,
+  );
+  let tasks = await db.query("SELECT status FROM tasks WHERE user_id = $1 ORDER BY id", [user.id]);
+  assert.deepEqual(tasks, [{ status: "failed" }]);
+
+  // Queued, but the phone couldn't send it.
+  const task = await startTextTask(user, { phone: "+14155550922", recipientName: "Florist", message: "Hi, are you open Sunday?", objective: "Check hours", context: "" });
+  const sent = httpsmsSent.at(-1)!;
+  await httpsmsEvent("message.send.failed", { id: sent.id, request_id: sent.request_id, owner: "+14155550100", contact: sent.to, error_message: "RESULT_ERROR_GENERIC_FAILURE" });
+  await until(async () => (await db.query("SELECT status FROM tasks WHERE id = $1 AND status = 'failed'", [task.id]))[0], "the failed task");
+  const chat = await chatLines(user.id);
+  assert.match(chat.at(-1)!.body, /Texts with Florist .* failed:\nMy text couldn't be delivered: RESULT_ERROR_GENERIC_FAILURE/);
+});
+
+test("invited users can text the agent; replies go back by text, and the admin can turn texting off", { skip: !enabled }, async () => {
+  const phone = "+14155550931";
+  const user = await textingUser("Uma User", phone);
+  const sent = httpsmsSent.length;
+  await received(phone, "Can you text the bakery for me?");
+  // The fake chat model errors, so the agent's fallback reply is texted back.
+  await until(async () => httpsmsSent.length > sent, "the reply to the user");
+  assert.deepEqual([httpsmsSent.at(-1)!.to, httpsmsSent.at(-1)!.content], [phone, "Sorry, something went wrong on my end. Please try again in a minute."]);
+  let chat = await chatLines(user.id);
+  assert.deepEqual(chat.filter((l) => l.role !== "event").map((l) => [l.role, l.via]), [["user", "sms"], ["assistant", "sms"]]);
+  // The web chat shows which lines were texts.
+  const { issueInviteLink } = await import("../src/web/auth.js");
+  const link = (await issueInviteLink(user.id)).replace("https://agent.test", "");
+  const cookie = await createLogin(link, "uma@example.com", "uma password 1");
+  const state = await (await fetch(`${base}/app/api/state`, { headers: { Cookie: cookie } })).json();
+  assert.deepEqual(state.messages.map((m: any) => m.via), ["sms", "sms"]);
+
+  // STOP: one confirmation, then replies stay in the web chat until START.
+  await received(phone, "Stop");
+  await until(async () => httpsmsSent.at(-1)!.content.startsWith("Okay, I won't text you anymore."), "the STOP confirmation");
+  const { repliesByText, userChatConversation } = await import("../src/tasks.js");
+  const thread = await userChatConversation(user);
+  await until(async () => !(await repliesByText(user, thread.id)), "texts to the user to stop");
+  const beforeStart = httpsmsSent.length;
+  await received(phone, "START");
+  await until(async () => repliesByText(user, thread.id), "texts to the user to resume");
+  // START is a normal message too, and its reply is texted again.
+  await until(async () => httpsmsSent.length > beforeStart, "the reply after START");
+
+  // Texting off: the admin's switch stops replies; the text is still kept.
+  const admin = await login();
+  const off = await fetch(`${base}/admin/settings/texts`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: admin },
+    body: form({ enabled: "0" }),
+  });
+  assert.equal(off.headers.get("location"), "/admin/settings?texts=off");
+  const page = await (await fetch(`${base}/admin/settings`, { headers: { Cookie: admin } })).text();
+  assert.match(page, /Turn texting back on/);
+  const { startTextTask } = await import("../src/tasks.js");
+  await assert.rejects(startTextTask(user, { phone: "+14155550932", recipientName: "", message: "Hi", objective: "x", context: "" }), /Texting is turned off/);
+  const before = httpsmsSent.length;
+  await received(phone, "Hello?");
+  await until(async () => (await chatLines(user.id)).some((l) => l.body === "Hello?"), "the stored text");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(httpsmsSent.length, before);
+  chat = await chatLines(user.id);
+  assert.equal(chat.at(-1)!.body, "Texting is turned off; this text wasn't answered");
+  await fetch(`${base}/admin/settings/texts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: admin },
+    body: form({ enabled: "1" }),
+  });
 });

@@ -29,6 +29,7 @@ import { decryptSecret, encryptSecret, generateRecoveryCodes, generateSecret, ot
 import { codePage, esc, fmtDate, layout, loginPage, recoveryCodesPage, setCallsEnabledBanner, setupPage } from "./views.js";
 import { COMMON_TIMEZONES, DEFAULT_SETTINGS, GREETING_PLACEHOLDERS, allTimezones, getSettings, saveSettings, validateSettings, type Settings } from "../settings.js";
 import { twilioClient } from "../twilio.js";
+import { smsConfigured, smsPhoneNumber } from "../sms.js";
 import {
   MAX_PROMPT_LENGTH,
   PLACEHOLDER_HELP,
@@ -226,7 +227,7 @@ adminRouter.get("/admin/conversations/:id", async (req, res) => {
             : `<div><a href="/admin/attachments/${a.id}" target="_blank">📎 ${esc(a.content_type)}</a></div>`,
         )
         .join("");
-      return `<div class="msg ${m.role}"><div class="meta">${esc(who)} · ${esc(fmtDate(m.created_at))}</div>${esc(m.body)}${files}</div>`;
+      return `<div class="msg ${m.role}"><div class="meta">${esc(who)} · ${esc(fmtDate(m.created_at))}${m.via === "sms" ? " · text" : ""}</div>${esc(m.body)}${files}</div>`;
     })
     .join("");
 
@@ -513,6 +514,17 @@ function settingsPage(settings: Settings, notice = "", error = "", recoveryLeft 
         <button class="${settings.callsEnabled ? "danger" : "primary"}">${settings.callsEnabled ? "Turn off all calls" : "Turn calls back on"}</button>
         <span class="small muted">${settings.callsEnabled ? "Turning calls off hangs up any call in progress. The web chat keeps working." : "The agent won't place or answer calls. The web chat still works."}</span>
       </form></div>
+     <div class="card"><h3>Texts</h3>${
+       smsConfigured()
+         ? `<form method="post" action="/admin/settings/texts" class="switch"
+        ${settings.textsEnabled ? `data-confirm="Turn off texting? The agent won&#39;t send texts or answer the texts it gets until you turn it back on."` : ""}>
+        <span class="state ${settings.textsEnabled ? "ok" : "bad"}">${settings.textsEnabled ? "On" : "Off"}</span>
+        <input type="hidden" name="enabled" value="${settings.textsEnabled ? "0" : "1"}">
+        <button class="${settings.textsEnabled ? "danger" : "primary"}">${settings.textsEnabled ? "Turn off texting" : "Turn texting back on"}</button>
+        <span class="small muted">Texts go through httpSMS from ${esc(formatPhone(smsPhoneNumber()))}. ${settings.textsEnabled ? "Incoming texts are still logged while texting is off." : "The agent won't send or answer texts. Incoming texts are still logged."}</span>
+      </form>`
+         : `<p class="small muted">Texting isn't set up. To let the agent text people, install the httpSMS app on an Android phone, then set <code>HTTPSMS_API_KEY</code>, <code>HTTPSMS_PHONE_NUMBER</code> and <code>HTTPSMS_WEBHOOK_SIGNING_KEY</code> in <code>.env</code> and add an httpSMS webhook to <code>${esc(config.publicBaseUrl)}/httpsms/webhook</code>. See the README.</p>`
+     }</div>
      <form method="post" action="/admin/settings">
       <div class="card"><h3>Recording greetings</h3>
        <p class="small muted">Played word for word at the start of every call, before the AI joins. Each one must say the call is recorded, and greetings to other people must say it's an AI assistant.</p>
@@ -524,7 +536,11 @@ function settingsPage(settings: Settings, notice = "", error = "", recoveryLeft 
         <label>Time zone<select name="timezone" required>${timezoneOptions(settings.timezone)}</select></label>
         <label>Call time limit (minutes)<input type="number" name="maxCallMinutes" min="1" max="60" value="${settings.maxCallMinutes}" required></label>
        </div>
-       <p class="small muted">The time zone is used for calling hours, the agent's sense of the current time, and dates shown in this admin panel. Hours apply to calls the agent places. At the time limit the agent says goodbye and hangs up.</p></div>
+       <p class="small muted">The time zone is used for calling hours, the agent's sense of the current time, and dates shown in this admin panel. Hours apply to calls the agent places and texts it starts. At the time limit the agent says goodbye and hangs up.</p></div>
+      <div class="card"><h3>Text footer</h3>
+       <p class="small muted">Added to the first text the agent sends someone${smsConfigured() ? "" : " (once texting is set up)"}. It must say the text is from an AI assistant and that they can reply STOP. Placeholders: ${GREETING_PLACEHOLDERS.textFooter.map((p) => `<code>${p}</code>`).join(", ")}.
+       Default: <i>${esc(DEFAULT_SETTINGS.textFooter)}</i></p>
+       <textarea class="wide" name="textFooter" rows="2" maxlength="200" required>${esc(settings.textFooter)}</textarea></div>
       <button class="primary">Save settings</button>
      </form>`,
     "/admin/settings",
@@ -547,7 +563,11 @@ adminRouter.get("/admin/settings", async (req, res) => {
         ? "Calls are on."
         : req.query.calls === "off"
           ? `Calls are off.${ended ? ` Ended ${ended} call${ended === 1 ? "" : "s"} in progress.` : ""}`
-          : "";
+          : req.query.texts === "on"
+            ? "Texting is on."
+            : req.query.texts === "off"
+              ? "Texting is off."
+              : "";
   const left = await recoveryCodesLeft();
   const warn = req.query.recovery === "low" ? `Only ${left} recovery code${left === 1 ? "" : "s"} left. Make new ones below.` : "";
   res.send(settingsPage(await getSettings(), notice, warn, left));
@@ -589,10 +609,11 @@ adminRouter.post("/admin/settings", async (req, res) => {
     contactHoursEnd: Number(req.body.contactHoursEnd),
     timezone: String(req.body.timezone ?? "").trim(),
     maxCallMinutes: Number(req.body.maxCallMinutes),
+    textFooter: String(req.body.textFooter ?? current.textFooter).trim(),
   };
   const error = validateSettings(next);
   if (error) return void res.status(400).send(settingsPage(next, "", error, await recoveryCodesLeft()));
-  const { callsEnabled: _unchanged, ...changes } = next;
+  const { callsEnabled: _calls, textsEnabled: _texts, ...changes } = next;
   await saveSettings(changes);
   res.redirect("/admin/settings?saved=1");
 });
@@ -604,6 +625,12 @@ adminRouter.post("/admin/settings/calls", async (req, res) => {
   let ended = 0;
   if (!enabled) ended = await endActiveCalls();
   res.redirect(`/admin/settings?calls=${enabled ? "on" : "off"}&ended=${ended}`);
+});
+
+adminRouter.post("/admin/settings/texts", async (req, res) => {
+  const enabled = req.body.enabled === "1";
+  await saveSettings({ textsEnabled: enabled });
+  res.redirect(`/admin/settings?texts=${enabled ? "on" : "off"}`);
 });
 
 /** Hang up (or cancel, if still ringing) every call that hasn't ended. */

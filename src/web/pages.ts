@@ -231,15 +231,15 @@ export function callPage(task: Task, calls: Array<{ call: Conversation; lines: M
         })
         .join("");
       return `<section class="card call">
-        <div class="callhead"><span class="dir">${call.direction === "outbound" ? "Call placed" : "They called back"}</span><span class="muted small">${esc(fmtDate(call.started_at))}${call.call_status ? ` · ${esc(call.call_status)}` : ""}</span></div>
+        <div class="callhead"><span class="dir">${call.kind === "task_sms" ? (call.direction === "outbound" ? "Texts" : "They texted") : call.direction === "outbound" ? "Call placed" : "They called back"}</span><span class="muted small">${esc(fmtDate(call.started_at))}${call.call_status ? ` · ${esc(call.call_status)}` : ""}</span></div>
         ${call.recording_sid ? `<audio controls preload="none" src="/app/recordings/${call.id}.mp3"></audio>` : ""}
         ${call.summary ? `<div class="summary"><div class="label">Summary</div>${esc(call.summary)}</div>` : ""}
-        ${transcript ? `<div class="label">Transcript</div><div class="transcript">${transcript}</div>` : `<p class="muted">No transcript.</p>`}
+        ${transcript ? `<div class="label">${call.kind === "task_sms" ? "Messages" : "Transcript"}</div><div class="transcript">${transcript}</div>` : `<p class="muted">${call.kind === "task_sms" ? "No messages." : "No transcript."}</p>`}
       </section>`;
     })
     .join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Call with ${esc(who)} · ${esc(name)}</title>
+<title>${task.kind === "sms" ? "Texts" : "Call"} with ${esc(who)} · ${esc(name)}</title>
 <style>${BASE_CSS}
 header{position:sticky;top:0}
 main{max-width:760px;margin:0 auto;padding:20px 16px 40px}
@@ -274,7 +274,7 @@ audio{width:100%;margin:0 0 14px;border-radius:99px}
       ${task.result ? `<div class="fact result"><div class="label">Result</div>${esc(task.result)}</div>` : ""}
     </div>
   </section>
-  ${sections || `<p class="muted" style="text-align:center">The call hasn't started yet.</p>`}
+  ${sections || `<p class="muted" style="text-align:center">${task.kind === "sms" ? "Nothing has been sent yet." : "The call hasn't started yet."}</p>`}
 </main></body></html>`;
 }
 

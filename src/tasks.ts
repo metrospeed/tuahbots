@@ -13,15 +13,16 @@ import {
 import { countryOf, formatPhone, toE164 } from "./phone.js";
 import { twilioClient } from "./twilio.js";
 import { recordCalledNumber } from "./numbers.js";
-import { getSettings } from "./settings.js";
+import { fillGreeting, getSettings } from "./settings.js";
+import { sendTextMessage, smsConfigured, smsPhoneNumber } from "./sms.js";
 
 export class TaskError extends Error {}
 
-/** Shared checks before contacting any third-party number. */
-export async function checkOutboundAllowed(user: User, rawPhone: string): Promise<string> {
+/** Shared checks before calling or texting any third-party number. */
+export async function checkOutboundAllowed(user: User, rawPhone: string, kind: "call" | "sms" = "call"): Promise<string> {
   const phone = toE164(rawPhone);
   if (!phone) throw new TaskError(`"${rawPhone}" is not a valid phone number.`);
-  if (phone === config.twilio.phoneNumber) throw new TaskError("That is my own number.");
+  if (phone === config.twilio.phoneNumber || (smsConfigured() && phone === smsPhoneNumber())) throw new TaskError("That is my own number.");
   const country = countryOf(phone);
   if (!country || !config.agent.allowedCountries.includes(country)) {
     throw new TaskError(`Contacting numbers in ${country ?? "that country"} is not allowed.`);
@@ -30,13 +31,15 @@ export async function checkOutboundAllowed(user: User, rawPhone: string): Promis
   if (await isBlocked(phone)) throw new TaskError("That number has opted out or been blocked by the administrator.");
 
   const settings = await getSettings();
-  if (!settings.callsEnabled) throw new TaskError("Calling is turned off by the administrator right now.");
+  if (kind === "call" && !settings.callsEnabled) throw new TaskError("Calling is turned off by the administrator right now.");
+  if (kind === "sms" && !smsConfigured()) throw new TaskError("Texting isn't set up, so I can only place calls.");
+  if (kind === "sms" && !settings.textsEnabled) throw new TaskError("Texting is turned off by the administrator right now.");
   const hour = Number(
     new Intl.DateTimeFormat("en-US", { hour: "numeric", hour12: false, timeZone: settings.timezone }).format(new Date()),
   ) % 24;
   if (hour < settings.contactHoursStart || hour >= settings.contactHoursEnd) {
     throw new TaskError(
-      `I only call people between ${settings.contactHoursStart}:00 and ${settings.contactHoursEnd}:00 (${settings.timezone}). Please ask again then.`,
+      `I only ${kind === "sms" ? "text" : "call"} people between ${settings.contactHoursStart}:00 and ${settings.contactHoursEnd}:00 (${settings.timezone}). Please ask again then.`,
     );
   }
 
@@ -45,7 +48,7 @@ export async function checkOutboundAllowed(user: User, rawPhone: string): Promis
     [user.id],
   );
   if (Number(row?.count ?? 0) >= config.agent.maxOutboundPerUserPerDay) {
-    throw new TaskError("You've reached today's limit for calls.");
+    throw new TaskError("You've reached today's limit for calls and texts.");
   }
   return phone;
 }
@@ -56,7 +59,7 @@ function isEmergencyOrShortCode(e164: string): boolean {
 }
 
 async function createTask(user: User, t: {
-  kind: "call";
+  kind: "call" | "sms";
   phone: string;
   targetName: string;
   objective: string;
@@ -117,6 +120,34 @@ export async function placeTaskCall(task: Task, user: User): Promise<void> {
   }
 }
 
+/**
+ * Text a third party for a user: the first text carries the admin's footer
+ * (AI disclosure and how to opt out). Their replies are handled in src/texts.ts.
+ */
+export async function startTextTask(user: User, input: {
+  phone: string;
+  recipientName: string;
+  message: string;
+  objective: string;
+  context: string;
+}): Promise<Task> {
+  const phone = await checkOutboundAllowed(user, input.phone, "sms");
+  const message = input.message.trim();
+  if (!message) throw new TaskError("The text to send is empty.");
+  const task = await createTask(user, { kind: "sms", phone, targetName: input.recipientName, objective: input.objective, context: input.context });
+  await recordCalledNumber(user.id, phone, input.recipientName);
+  const conversation = await createConversation({ kind: "task_sms", userId: user.id, taskId: task.id, counterpartPhone: phone, direction: "outbound" });
+  const footer = fillGreeting((await getSettings()).textFooter, { agent: config.agent.name, requester: user.name });
+  await addMessage(conversation.id, "event", `First text to ${formatPhone(phone)} for task #${task.id}`);
+  try {
+    await sendTextMessage(conversation, phone, `${message}\n\n${footer}`);
+  } catch (err) {
+    await finishTask(task.id, "failed", `The text could not be sent: ${(err as Error).message}`);
+    throw new TaskError(`The text could not be sent: ${(err as Error).message}`);
+  }
+  return task;
+}
+
 /** Mark a task finished and post the result to the requester's chat (once). */
 export async function finishTask(taskId: number, status: "completed" | "failed" | "cancelled", result: string): Promise<void> {
   const task = await queryOne<Task>(
@@ -128,13 +159,32 @@ export async function finishTask(taskId: number, status: "completed" | "failed" 
   const user = await getUser(task.user_id);
   if (!user?.active) return;
   const who = task.target_name || formatPhone(task.target_phone);
-  await notifyUser(user, `Call with ${who} (task #${task.id}) ${status === "completed" ? "done" : "failed"}:\n${result}`);
+  const what = task.kind === "sms" ? "Texts with" : "Call with";
+  await notifyUser(user, `${what} ${who} (task #${task.id}) ${status === "completed" ? "done" : "failed"}:\n${result}`);
 }
 
-/** Post a message from the agent into a user's web chat. */
+/**
+ * Post a message from the agent into a user's web chat. If they last wrote by
+ * text, it's texted to them too.
+ */
 export async function notifyUser(user: User, body: string): Promise<void> {
   const conversation = await userChatConversation(user);
-  await addMessage(conversation.id, "assistant", body);
+  if (!(await repliesByText(user, conversation.id))) {
+    await addMessage(conversation.id, "assistant", body);
+    return;
+  }
+  await sendTextMessage(conversation, user.phone!, body).catch((err) => console.error("Texting the user failed", err));
+}
+
+/** Replies go where the user last wrote from: by text if their latest message was a text (and texting is on). */
+export async function repliesByText(user: User, conversationId: number): Promise<boolean> {
+  // A user who texted STOP gets replies in the web chat only, until they text START.
+  if (!user.phone || !smsConfigured() || !(await getSettings()).textsEnabled || (await isBlocked(user.phone))) return false;
+  const last = await queryOne<{ via: string | null }>(
+    "SELECT via FROM messages WHERE conversation_id = $1 AND role = 'user' ORDER BY id DESC LIMIT 1",
+    [conversationId],
+  );
+  return last?.via === "sms";
 }
 
 /** Each invited user has one long-running web chat thread with the agent. */
@@ -168,5 +218,5 @@ export async function visibleTask(userId: number, taskId: number): Promise<Task 
 export function describeTask(t: Task): string {
   const who = t.target_name ? `${t.target_name} (${formatPhone(t.target_phone)})` : formatPhone(t.target_phone);
   const when = t.created_at.toISOString().slice(0, 16).replace("T", " ");
-  return `#${t.id} ${t.kind} to ${who}, ${when} UTC, status ${t.status}. Objective: ${t.objective}${t.result ? `\nResult: ${t.result}` : ""}`;
+  return `#${t.id} ${t.kind === "sms" ? "texts" : "call"} to ${who}, ${when} UTC, status ${t.status}. Objective: ${t.objective}${t.result ? `\nResult: ${t.result}` : ""}`;
 }
