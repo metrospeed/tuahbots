@@ -36,6 +36,12 @@ export function setCallsEnabledBanner(enabled: boolean): void {
   callsEnabled = enabled;
 }
 
+/** Names of recording greetings switched off for testing, refreshed per request like the calls-off banner. */
+let greetingsOffLabels: string[] = [];
+export function setGreetingsOffBanner(labels: string[]): void {
+  greetingsOffLabels = labels;
+}
+
 export function layout(title: string, body: string, active = ""): string {
   const nav = NAV.map(([href, label]) => `<a href="${href}" class="${href === active ? "on" : ""}">${label}</a>`).join("");
   return `<!doctype html>
@@ -63,7 +69,7 @@ th:first-child{border-top-left-radius:10px}th:last-child{border-top-right-radius
 tr:hover td{background:color-mix(in srgb,var(--soft) 50%,transparent)}
 a{color:var(--accent)}.muted{color:var(--muted)}.small{font-size:12.5px}
 .badge{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12px;font-weight:550;background:var(--accent-soft);color:var(--accent);white-space:nowrap}
-.bad{color:var(--bad)}.ok{color:var(--ok)}
+.bad{color:var(--bad)}.ok{color:var(--ok)}.badge.bad{background:color-mix(in srgb,var(--bad) 14%,transparent)}
 .msg{max-width:80%;padding:10px 14px;border-radius:16px;margin:8px 0;white-space:pre-wrap;word-wrap:break-word}
 .msg.user{background:var(--user);border-bottom-left-radius:5px}.msg.counterpart{background:var(--them);border-bottom-left-radius:5px}.msg.assistant{background:var(--bot);margin-left:auto;border-bottom-right-radius:5px}
 .msg .meta{font-size:11.5px;font-weight:550;color:var(--muted);margin-bottom:2px}
@@ -85,6 +91,7 @@ label.check{display:inline-flex;gap:8px;align-items:center;font-size:13.5px;marg
 <header><b>${esc(config.agent.name)} admin</b>${nav}
 <form method="post" action="/admin/logout"><button>Log out</button></form></header>
 ${callsEnabled ? "" : `<div class="callsoff">Calls are turned off. The agent won't place or answer any calls. <a href="/admin/settings">Settings</a></div>`}
+${greetingsOffLabels.length ? `<div class="callsoff">Recording greetings are off (testing) for: ${esc(greetingsOffLabels.join(", "))}. Those calls start without the recording or AI disclosure. <a href="/admin/settings">Settings</a></div>` : ""}
 <main>${body}</main><script src="/assets/admin.js" defer></script></body></html>`;
 }
 

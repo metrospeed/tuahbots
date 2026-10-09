@@ -6,7 +6,8 @@ const { validateInput } = await import("../src/agent/llm.js");
 const { toE164 } = await import("../src/phone.js");
 const { withLock } = await import("../src/lock.js");
 const { createRelaySession, takeRelaySession } = await import("../src/voice/sessions.js");
-const { buildRelayTwiml } = await import("../src/voice/twiml.js");
+const twimlModule = await import("../src/voice/twiml.js");
+const { buildRelayTwiml } = twimlModule;
 const { dtmfAudio, linearToMulaw } = await import("../src/voice/dtmf.js");
 const { normalizeRecording } = await import("../src/recordings.js");
 const { execFileSync, spawnSync } = await import("node:child_process");
@@ -580,4 +581,12 @@ test("OpenRouter: fixed endpoint, Chat Completions, no-data-collection routing; 
   const custom = provider.agentEndpoint({ ...provider.DEFAULT_AI_SETTINGS, provider: "custom", baseUrl: "https://llm.example.com/v1" });
   assert.equal(custom.client.apiKey, "no-key");
   assert.throws(() => provider.agentEndpoint({ ...provider.DEFAULT_AI_SETTINGS, provider: "custom", baseUrl: "" }), /No endpoint URL/);
+});
+
+test("TwiML leaves out the greeting only when it's switched off", () => {
+  const { buildStreamTwiml } = twimlModule;
+  assert.match(buildStreamTwiml("tok", "This call is recorded."), /<Say[^>]*>This call is recorded\.<\/Say><Connect/);
+  assert.doesNotMatch(buildStreamTwiml("tok", ""), /<Say/);
+  assert.doesNotMatch(buildRelayTwiml("tok", ""), /welcomeGreeting/);
+  assert.match(buildRelayTwiml("tok", "Recorded call."), /welcomeGreeting="Recorded call\."/);
 });

@@ -20,7 +20,7 @@ import { connectCall } from "../voice/connect.js";
 import { dropPrewarmedCall } from "../voice/live.js";
 import { finalizeCall } from "../voice/summary.js";
 import { sayAndHangup } from "../voice/twiml.js";
-import { fillGreeting, getSettings } from "../settings.js";
+import { callGreeting, getSettings } from "../settings.js";
 import { loadPromptOverrides } from "../agent/prompts.js";
 import { loadAiSettings } from "../agent/provider.js";
 
@@ -49,7 +49,7 @@ async function inboundCallTwiml(from: string, callSid: string): Promise<string> 
       await addMessage(conversation.id, "event", "Calls are turned off; call rejected");
       return sayAndHangup(`Sorry, ${config.agent.name} isn't taking calls right now. You can still use the web chat. Goodbye.`);
     }
-    const greeting = fillGreeting(settings.greetingUserInbound, { agent: config.agent.name, caller: user.name.split(" ")[0] });
+    const greeting = callGreeting(settings, "greetingUserInbound", { agent: config.agent.name, caller: user.name.split(" ")[0] });
     return connectCall({ mode: "user", conversationId: conversation.id, userId: user.id, greeting });
   }
 
@@ -71,7 +71,7 @@ async function inboundCallTwiml(from: string, callSid: string): Promise<string> 
       return sayAndHangup("Sorry, no one is available to take your call right now. Goodbye.");
     }
     await query("UPDATE tasks SET status = 'in_progress', completed_at = NULL WHERE id = $1", [task.id]);
-    const greeting = fillGreeting(settings.greetingCallback, { agent: config.agent.name, requester: requester.name });
+    const greeting = callGreeting(settings, "greetingCallback", { agent: config.agent.name, requester: requester.name });
     return connectCall({ mode: "task", conversationId: conversation.id, taskId: task.id, userId: requester.id, greeting });
   }
 
@@ -102,7 +102,7 @@ voiceRouter.post("/twilio/voice/answered/:conversationId", requireTwilioSignatur
       return void res.type("text/xml").send("<Response><Hangup/></Response>");
     }
     await Promise.all([loadPromptOverrides(), loadAiSettings()]);
-    const greeting = fillGreeting(settings.greetingOutbound, {
+    const greeting = callGreeting(settings, "greetingOutbound", {
       agent: config.agent.name,
       requester: requester.name,
       recipient: task.target_name || "there",
